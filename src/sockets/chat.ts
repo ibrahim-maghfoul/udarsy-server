@@ -69,9 +69,10 @@ export const handleChatConnection = (io: Server, socket: Socket) => {
             });
             await newMessage.save();
 
-            chatRoom.lastMessagePreview = data.text;
-            chatRoom.lastMessageAt = new Date();
-            await chatRoom.save();
+            await ChatRoom.updateOne(
+                { _id: chatRoom._id },
+                { lastMessagePreview: data.text, lastMessageAt: new Date() }
+            );
 
             const populatedMessage = await Message.findById(newMessage._id)
                 .populate('sender', 'displayName photoURL subscription.plan role')
