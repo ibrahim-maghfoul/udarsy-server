@@ -5,7 +5,7 @@ interface TranslationEntry {
     desc?: string;
 }
 
-export interface IGlobalEvent extends Document {
+export interface IMoroccanHoliday extends Document {
     id: string;
     title: string;
     desc?: string;
@@ -28,7 +28,7 @@ const TranslationSchema = new Schema<TranslationEntry>(
     { _id: false }
 );
 
-const GlobalEventSchema = new Schema<IGlobalEvent>({
+const MoroccanHolidaySchema = new Schema<IMoroccanHoliday>({
     id:       { type: String, required: true, unique: true },
     title:    { type: String, required: true },
     desc:     { type: String },
@@ -46,4 +46,4 @@ const GlobalEventSchema = new Schema<IGlobalEvent>({
     timestamps: true,
 });
 
-export const GlobalEvent = mongoose.model<IGlobalEvent>('GlobalEvent', GlobalEventSchema);
+export const MoroccanHoliday = mongoose.model<IMoroccanHoliday>('MoroccanHoliday', MoroccanHolidaySchema);

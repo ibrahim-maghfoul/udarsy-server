@@ -1,7 +1,57 @@
 import { Request, Response } from 'express';
+import crypto from 'crypto';
 
 const GA_MEASUREMENT_ID  = process.env.GA_MEASUREMENT_ID ?? '';
 const GA_API_SECRET      = process.env.GA_API_SECRET ?? '';
+const GA4_PROPERTY_ID    = process.env.GA4_PROPERTY_ID ?? '';
+const GA4_SERVICE_ACCOUNT_KEY = process.env.GA4_SERVICE_ACCOUNT_KEY ?? '';
+
+// ─── GA4 Data API helpers ─────────────────────────────────────────────────────
+
+let _cachedToken: { token: string; expiresAt: number } | null = null;
+
+async function getServiceAccountToken(keyJson: any): Promise<string> {
+    if (_cachedToken && Date.now() < _cachedToken.expiresAt) return _cachedToken.token;
+
+    const now = Math.floor(Date.now() / 1000);
+    const header  = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({
+        iss:   keyJson.client_email,
+        scope: 'https://www.googleapis.com/auth/analytics.readonly',
+        aud:   'https://oauth2.googleapis.com/token',
+        exp:   now + 3600,
+        iat:   now,
+    })).toString('base64url');
+
+    const sign = crypto.createSign('RSA-SHA256');
+    sign.update(`${header}.${payload}`);
+    const signature = sign.sign(keyJson.private_key, 'base64url');
+    const jwt = `${header}.${payload}.${signature}`;
+
+    const res = await fetch('https://oauth2.googleapis.com/token', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body:    new URLSearchParams({
+            grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+            assertion:  jwt,
+        }),
+    });
+    const data = await res.json() as { access_token: string };
+    _cachedToken = { token: data.access_token, expiresAt: Date.now() + 55 * 60 * 1000 };
+    return data.access_token;
+}
+
+async function ga4Report(propertyId: string, token: string, body: object) {
+    const res = await fetch(
+        `https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`,
+        {
+            method:  'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body:    JSON.stringify(body),
+        }
+    );
+    return res.json() as Promise<any>;
+}
 const GA_MP_URL          = 'https://www.google-analytics.com/mp/collect';
 
 // ─── Internal helpers ──────────────────────────────────────────────────────────
@@ -114,6 +164,66 @@ export const AnalyticsController = {
    *   userId    — user ID (optional)
    *   referrer  — HTTP referrer (optional)
    */
+  /**
+   * GET /api/analytics/report?days=7
+   * Read GA4 reporting data. Requires GA4_PROPERTY_ID + GA4_SERVICE_ACCOUNT_KEY env vars.
+   */
+  async getReport(req: Request, res: Response): Promise<void> {
+    if (!GA4_PROPERTY_ID || !GA4_SERVICE_ACCOUNT_KEY) {
+      res.json({ configured: false });
+      return;
+    }
+
+    const days = Math.min(parseInt(req.query.days as string) || 7, 90);
+
+    try {
+      const keyJson = JSON.parse(GA4_SERVICE_ACCOUNT_KEY);
+      const token   = await getServiceAccountToken(keyJson);
+
+      const dateRange = { startDate: `${days}daysAgo`, endDate: 'today' };
+
+      const [overview, pages] = await Promise.all([
+        ga4Report(GA4_PROPERTY_ID, token, {
+          dateRanges: [dateRange],
+          metrics: [
+            { name: 'sessions' },
+            { name: 'activeUsers' },
+            { name: 'screenPageViews' },
+            { name: 'bounceRate' },
+            { name: 'averageSessionDuration' },
+          ],
+        }),
+        ga4Report(GA4_PROPERTY_ID, token, {
+          dateRanges: [dateRange],
+          dimensions: [{ name: 'pagePath' }],
+          metrics: [{ name: 'screenPageViews' }],
+          orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
+          limit: 5,
+        }),
+      ]);
+
+      const row = overview.rows?.[0]?.metricValues ?? [];
+      const topPages = (pages.rows ?? []).map((r: any) => ({
+        path:  r.dimensionValues?.[0]?.value ?? '/',
+        views: parseInt(r.metricValues?.[0]?.value ?? '0'),
+      }));
+
+      res.json({
+        configured: true,
+        days,
+        sessions:            parseInt(row[0]?.value ?? '0'),
+        users:               parseInt(row[1]?.value ?? '0'),
+        pageviews:           parseInt(row[2]?.value ?? '0'),
+        bounceRate:          parseFloat((parseFloat(row[3]?.value ?? '0') * 100).toFixed(1)),
+        avgSessionDuration:  parseFloat(parseFloat(row[4]?.value ?? '0').toFixed(1)),
+        topPages,
+      });
+    } catch (err) {
+      console.error('[Analytics] GA4 report error:', err);
+      res.status(500).json({ configured: true, error: 'Failed to fetch GA4 data' });
+    }
+  },
+
   async trackPageView(req: Request, res: Response): Promise<void> {
     const { path, title, clientId, userId, referrer } = req.body as {
       path:      string;

@@ -13,9 +13,11 @@ export class NewsController {
 
             const [news, total] = await Promise.all([
                 News.find({}, {
-                    title: 1, description: 1, category: 1, imageUrl: 1,
-                    date: 1, card_date: 1, type: 1, readTime: 1,
+                    title: 1, description: 1, summary: 1, category: 1, imageUrl: 1, image_alt: 1,
+                    date: 1, card_date: 1, type: 1, readTime: 1, slug: 1,
                     attachments: 1, createdAt: 1, images: 1,
+                    status: 1, language: 1, important_dates: 1,
+                    rating: 1, viewCount: 1,
                 })
                     .sort({ _id: -1 })
                     .skip(skip)
@@ -126,6 +128,7 @@ export class NewsController {
     }
 
     // POST /api/news/bulk-upsert — upload many articles at once (idempotent)
+    // Accepts BOTH raw tawjihnet_full.json and organized-data.json formats.
     static async bulkUpsert(req: Request, res: Response): Promise<void> {
         try {
             const articles: any[] = req.body.articles;
@@ -134,31 +137,64 @@ export class NewsController {
                 return;
             }
 
+            const FALLBACK_IMG = 'https://images.unsplash.com/photo-1524178232363-1fb2b075b655?w=800';
+
             const ops = articles.map((art: any) => {
-                const imageUrl =
-                    art.imageUrl ||
-                    art.images?.[0]?.src ||
-                    'https://images.unsplash.com/photo-1524178232363-1fb2b075b655?w=800';
+                // Organized data uses art.image.url; raw data uses art.imageUrl
+                const isOrganized = !!(art.slug || art.source_url || art.important_dates);
+
+                const imageUrl = isOrganized
+                    ? (art.image?.url || art.imageUrl || FALLBACK_IMG)
+                    : (art.imageUrl || art.images?.[0]?.src || FALLBACK_IMG);
+
+                const imageAlt = isOrganized
+                    ? (art.image?.alt || art.image_alt || '')
+                    : (art.card_img_alt || '');
+
+                // description: organized has summary; raw uses first paragraph
+                const description = art.summary
+                    || art.description
+                    || art.paragraphs?.[0]
+                    || '';
+
+                // source URL
+                const sourceUrl = art.source_url || art.url || '';
+
+                const docId = (art.id ?? art._id)?.toString();
 
                 return {
                     updateOne: {
-                        filter: { _id: art.id?.toString() || art._id?.toString() },
+                        filter: { _id: docId },
                         update: {
                             $set: {
-                                _id: art.id?.toString() || art._id?.toString(),
+                                _id: docId,
                                 title: art.title || 'Untitled',
-                                description: art.paragraphs?.[0] || art.description || '',
+                                description,
                                 imageUrl,
+                                image_alt: imageAlt,
                                 category: art.category || 'General',
                                 type: art.type || 'Information',
                                 card_date: art.card_date || '',
-                                url: art.url || '',
+                                url: sourceUrl,
+                                readTime: art.readTime || `${Math.max(3, Math.floor((art.content_blocks?.length || art.content_sections?.length || 0) / 2))} min`,
+                                date: art.date ? new Date(art.date) : new Date(),
+                                // Raw fields (present in both; empty in organized)
                                 paragraphs: art.paragraphs || [],
                                 images: art.images || [],
                                 content_blocks: art.content_blocks || [],
                                 attachments: art.attachments || [],
-                                readTime: art.readTime || `${Math.max(3, Math.floor((art.content_blocks?.length || 0) / 2))} min`,
-                                date: art.date ? new Date(art.date) : new Date(),
+                                links: art.links || [],
+                                // Organized fields
+                                slug: art.slug || '',
+                                source_url: sourceUrl,
+                                summary: art.summary || '',
+                                important_dates: art.important_dates || [],
+                                requirements: art.requirements || [],
+                                steps: art.steps || [],
+                                documents: art.documents || [],
+                                content_sections: art.content_sections || [],
+                                language: art.language || 'mixed',
+                                status: art.status || 'unknown',
                             },
                         },
                         upsert: true,

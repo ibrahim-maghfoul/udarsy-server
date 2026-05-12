@@ -41,6 +41,8 @@ export interface IReport extends Document {
         totalExams: number;
         totalLessons: number;
         totalSubjects: number;
+        totalGuidances: number;
+        totalLevels: number;
         totalResources: number;
         totalItems: number;
         totalUsers: number;
@@ -90,6 +92,8 @@ const ReportSchema = new Schema<IReport>({
         totalExams: { type: Number },
         totalLessons: { type: Number },
         totalSubjects: { type: Number },
+        totalGuidances: { type: Number },
+        totalLevels: { type: Number },
         totalResources: { type: Number },
         totalItems: { type: Number },
         totalUsers: { type: Number },

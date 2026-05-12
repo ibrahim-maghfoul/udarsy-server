@@ -4,6 +4,7 @@ import ChatRoom from '../models/ChatRoom';
 import { TeacherRoomMessage } from '../models/TeacherRoomMessage';
 import { TeacherRoom } from '../models/TeacherRoom';
 import { containsBadWord } from '../utils/profanityFilter';
+import { User } from '../models/User';
 
 // In-memory active user tracker: room -> Map of { userId -> details }
 const roomUsers = new Map<string, Map<string, { userId: string, displayName: string, photoURL?: string, subscriptionPlan?: string }>>();
@@ -53,6 +54,14 @@ export const handleChatConnection = (io: Server, socket: Socket) => {
         // Profanity check
         if (containsBadWord(data.text)) {
             socket.emit('message_blocked', { reason: 'يحتوي رسالتك على كلمات غير لائقة' });
+            return;
+        }
+
+        // Mute check
+        const sender = await User.findById(data.sender).select('chatMutedUntil').lean();
+        if (sender?.chatMutedUntil && new Date(sender.chatMutedUntil) > new Date()) {
+            const until = new Date(sender.chatMutedUntil).toLocaleString('fr-MA');
+            socket.emit('message_blocked', { reason: `أنت ممنوع من الإرسال حتى ${until}`, muted: true, mutedUntil: sender.chatMutedUntil });
             return;
         }
 

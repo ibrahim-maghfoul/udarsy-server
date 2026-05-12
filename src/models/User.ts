@@ -102,6 +102,7 @@ export interface IUser extends Document {
     sessionId?: string;
     aiLastRegenDate?: Date;
     aiRegenCountToday?: number;
+    chatMutedUntil?: Date;
     createdAt: Date;
     updatedAt: Date;
     isPremium: boolean; // virtual
@@ -180,6 +181,7 @@ const UserSchema = new Schema<IUser>({
     sessionId: { type: String, select: false },
     aiLastRegenDate: { type: Date },
     aiRegenCountToday: { type: Number, default: 0 },
+    chatMutedUntil: { type: Date },
 }, {
     timestamps: true,
 });

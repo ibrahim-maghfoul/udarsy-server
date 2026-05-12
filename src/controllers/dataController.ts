@@ -9,6 +9,8 @@ import { Contribution } from '../models/Contribution';
 import { Report } from '../models/Report';
 import { SchoolService } from '../models/SchoolService';
 import { User } from '../models/User';
+import { News } from '../models/News';
+import { Feedback } from '../models/Feedback';
 import { cache } from '../utils/cache';
 
 
@@ -234,9 +236,123 @@ export class DataController {
         }
     }
 
-    // Recalculate all stats (Deprecated: Use analyze.js script)
+    // Recalculate all stats from real DB data and persist to Report document
     static async recalculateAllStats(_req: AuthRequest, res: Response): Promise<void> {
-        res.status(410).json({ error: 'This method is deprecated. Please use the udarsy-script/analyze.js utility.' });
+        try {
+            // Load all guidances, subjects, and lessons in parallel
+            const [guidances, subjects, lessons, totalUsers, totalLevels, newsAgg, contribAgg, feedbackAgg] = await Promise.all([
+                Guidance.find().lean(),
+                Subject.find().lean(),
+                Lesson.find().lean(),
+                User.countDocuments(),
+                Level.countDocuments(),
+                News.aggregate([{ $group: { _id: '$category', count: { $sum: 1 } } }]),
+                Contribution.aggregate([
+                    { $group: { _id: '$status', count: { $sum: 1 } } },
+                ]),
+                Feedback.aggregate([
+                    { $group: { _id: '$type', count: { $sum: 1 } } },
+                ]),
+            ]);
+
+            // Build lookup maps for fast access
+            const subjectsByGuidance = new Map<string, string[]>();
+            for (const s of subjects) {
+                const arr = subjectsByGuidance.get(s.guidanceId) ?? [];
+                arr.push(String(s._id));
+                subjectsByGuidance.set(s.guidanceId, arr);
+            }
+
+            const lessonsBySubject = new Map<string, typeof lessons>();
+            for (const l of lessons) {
+                const arr = lessonsBySubject.get(l.subjectId) ?? [];
+                arr.push(l);
+                lessonsBySubject.set(l.subjectId, arr);
+            }
+
+            // Per-guidance stats
+            const levelsStat = guidances.map(g => {
+                const gSubjectIds = subjectsByGuidance.get(String(g._id)) ?? [];
+                const gLessons = gSubjectIds.flatMap(sid => lessonsBySubject.get(sid) ?? []);
+
+                let pdfs = 0, videos = 0, exercises = 0, exams = 0;
+                for (const l of gLessons) {
+                    pdfs += l.coursesPdf?.length ?? 0;
+                    videos += l.videos?.length ?? 0;
+                    exercises += l.exercices?.length ?? 0;
+                    exams += l.exams?.length ?? 0;
+                }
+
+                return {
+                    guidanceId: String(g._id),
+                    title: g.title,
+                    totalSubjects: gSubjectIds.length,
+                    totalLessons: gLessons.length,
+                    totalPdfs: pdfs,
+                    totalVideos: videos,
+                    totalExercises: exercises,
+                    totalExams: exams,
+                    totalResources: pdfs + videos + exercises + exams,
+                };
+            });
+
+            // Overall totals
+            let totalPdfs = 0, totalVideos = 0, totalExercises = 0, totalExams = 0;
+            for (const l of lessons) {
+                totalPdfs += l.coursesPdf?.length ?? 0;
+                totalVideos += l.videos?.length ?? 0;
+                totalExercises += l.exercices?.length ?? 0;
+                totalExams += l.exams?.length ?? 0;
+            }
+
+            const totalResources = totalPdfs + totalVideos + totalExercises + totalExams;
+            const overallStat = {
+                totalPdfs,
+                totalVideos,
+                totalExercises,
+                totalExams,
+                totalLessons: lessons.length,
+                totalSubjects: subjects.length,
+                totalGuidances: guidances.length,
+                totalLevels,
+                totalResources,
+                totalItems: totalResources,
+                totalUsers,
+                totalNews: newsAgg.reduce((s, n) => s + n.count, 0),
+            };
+
+            // News by category
+            const newsStat = newsAgg.map(n => ({ category: n._id ?? 'unknown', count: n.count }));
+
+            // Contribution stats
+            const contribMap = Object.fromEntries(contribAgg.map(c => [c._id, c.count]));
+            const contributionStat = {
+                total: (contribMap['pending'] ?? 0) + (contribMap['approved'] ?? 0) + (contribMap['rejected'] ?? 0),
+                pending: contribMap['pending'] ?? 0,
+                approved: contribMap['approved'] ?? 0,
+                rejected: contribMap['rejected'] ?? 0,
+                byGuidance: [],
+            };
+
+            // Feedback stats
+            const feedbackStat = {
+                total: feedbackAgg.reduce((s, f) => s + f.count, 0),
+                byType: feedbackAgg.map(f => ({ type: f._id, count: f.count })),
+            };
+
+            // Persist
+            const report = await Report.findOneAndUpdate(
+                { type: 'dashboard_stats' },
+                { levelsStat, newsStat, contributionStat, feedbackStat, overallStat },
+                { upsert: true, new: true }
+            );
+
+            cache.del('stats:global');
+            res.json(report);
+        } catch (error) {
+            console.error('Recalculate stats error:', error);
+            res.status(500).json({ error: 'Failed to recalculate stats' });
+        }
     }
 
     // Get Global Stats (cached 2 min)
@@ -247,12 +363,16 @@ export class DataController {
             if (cached) { res.json(cached); return; }
 
             const report = await Report.findOne({ type: 'dashboard_stats' }).lean();
-            if (!report) {
-                res.status(404).json({ error: 'Global stats not found' });
-                return;
-            }
-            cache.set(CACHE_KEY, report, 2 * 60_000);
-            res.json(report);
+            const result = report ?? {
+                type: 'dashboard_stats',
+                levelsStat: [],
+                newsStat: [],
+                contributionStat: { total: 0, pending: 0, approved: 0, rejected: 0, byGuidance: [] },
+                feedbackStat: { total: 0, byType: [] },
+                overallStat: { totalPdfs: 0, totalVideos: 0, totalExercises: 0, totalExams: 0, totalLessons: 0, totalSubjects: 0, totalGuidances: 0, totalLevels: 0, totalResources: 0, totalItems: 0, totalUsers: 0, totalNews: 0 },
+            };
+            cache.set(CACHE_KEY, result, 2 * 60_000);
+            res.json(result);
         } catch (error) {
             console.error('Get global stats error:', error);
             res.status(500).json({ error: 'Failed to get global stats' });

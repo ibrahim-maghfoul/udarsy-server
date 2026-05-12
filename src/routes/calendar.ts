@@ -4,9 +4,12 @@ import { authMiddleware } from '../middleware/auth';
 
 const router = Router();
 
-// Global events — public (no auth needed)
-router.get('/global', CalendarController.getGlobalEvents);
+// Global events — public read, admin write
+router.get('/global',                CalendarController.getGlobalEvents);
 router.post('/global/seed-holidays', authMiddleware, CalendarController.seedHolidays);
+router.post('/global',               authMiddleware, CalendarController.createGlobalEvent);
+router.put('/global/:id',            authMiddleware, CalendarController.updateGlobalEvent);
+router.delete('/global/:id',         authMiddleware, CalendarController.deleteGlobalEvent);
 
 // User calendar — all require auth
 router.get('/',                       authMiddleware, CalendarController.getCalendar);

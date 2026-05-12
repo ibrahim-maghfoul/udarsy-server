@@ -30,6 +30,8 @@ import leaderboardRoutes from './routes/leaderboard';
 import notificationRoutes from './routes/notifications';
 import aiRoutes from './routes/ai';
 import analyticsRoutes from './routes/analytics';
+import adminRoutes from './routes/admin';
+import moroccanHolidaysRoutes from './routes/moroccanHolidays';
 import { handleChatConnection } from './sockets/chat';
 import { verifyAccessToken } from './utils/auth';
 
@@ -162,7 +164,8 @@ app.use('/api/leaderboard', leaderboardRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/analytics', analyticsRoutes);
-
+app.use('/api/admin', adminRoutes);
+app.use('/api/moroccan-holidays', moroccanHolidaysRoutes);
 // 404 handler
 app.use((_req: Request, res: Response) => {
     res.status(404).json({ error: 'Route not found' });

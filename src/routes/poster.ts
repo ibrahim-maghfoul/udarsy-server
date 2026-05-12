@@ -130,11 +130,11 @@ router.post('/generate-poster-image', async (req: Request, res: Response) => {
         const numImages = Math.min(parseInt(n as any) || 1, 4);
 
         // ── OpenAI models ──
-        if (model === 'dall-e-2' || model === 'dall-e-3' || model === 'gpt-image-1') {
+        if (model === 'dall-e-2' || model === 'dall-e-3' || model === 'gpt-image-1' || model === 'gpt-image-2') {
             const openaiKey = process.env.OPENAI_API_KEY;
             if (!openaiKey) return res.status(500).json({ error: 'OPENAI_API_KEY not set in backend .env' });
 
-            // dall-e-3 only supports n=1 per call; gpt-image-1 and dall-e-2 support batches
+            // dall-e-3 only supports n=1 per call; others support batches
             const batchSize = model === 'dall-e-3' ? 1 : numImages;
             const calls = model === 'dall-e-3' ? numImages : 1;
 
@@ -152,12 +152,17 @@ router.post('/generate-poster-image', async (req: Request, res: Response) => {
 
                 if (model === 'dall-e-3') {
                     body.quality = 'hd';
-                    body.style = 'natural'; // 'natural' follows instructions more literally than 'vivid'
+                    body.style = 'natural';
                     body.response_format = 'url';
                 } else if (model === 'dall-e-2') {
                     body.response_format = 'url';
+                } else if (model === 'gpt-image-2') {
+                    // gpt-image-2: returns base64, supports flexible sizes up to 3840px, quality: low/medium/high/auto
+                    body.quality = 'auto';
+                    body.size = '1024x1024';
+                    body.output_format = 'png';
                 } else {
-                    // gpt-image-1: returns base64, no response_format field needed
+                    // gpt-image-1: returns base64
                     body.quality = 'high';
                 }
 
@@ -203,6 +208,7 @@ router.post('/generate-poster-image', async (req: Request, res: Response) => {
 
             let attempts = 0;
             let imageSuccess = false;
+            let consecutiveJsonErrors = 0;
 
             while (attempts < activeApiKeys.length) {
                 const apiKey = activeApiKeys[localKeyIndex];
@@ -219,8 +225,17 @@ router.post('/generate-poster-image', async (req: Request, res: Response) => {
                     });
 
                     let data: any;
-                    try { data = await response.json(); }
-                    catch { throw new Error('Invalid JSON from infip API'); }
+                    try { data = await response.json(); consecutiveJsonErrors = 0; }
+                    catch {
+                        consecutiveJsonErrors++;
+                        // If the API returns non-JSON 3 times in a row, the service is down — skip to fallback
+                        if (consecutiveJsonErrors >= 3) {
+                            console.warn('⚠️ infip API returning non-JSON repeatedly — service appears down, skipping to fallback');
+                            allKeysExhausted = true;
+                            break;
+                        }
+                        throw new Error('Invalid JSON from infip API');
+                    }
 
                     if (!response.ok) {
                         const errMsg = data.detail || data.error?.message || data.message || `HTTP ${response.status}`;
@@ -431,6 +446,31 @@ router.post('/save-poster-image', async (req: Request, res: Response) => {
         return res.json({ filename: safeFilename, path: `/data/posters/${safeFilename}` });
     } catch (error: any) {
         console.error('Poster save error:', error);
+        return res.status(500).json({ error: error.message });
+    }
+});
+
+// ─── POST /save-logo-overlay ──────────────────────────────────────────────────
+// Saves a composited poster (with logo) to udarsy-admin/public/assets/Added logo/
+
+router.post('/save-logo-overlay', async (req: Request, res: Response) => {
+    try {
+        const { imageUrl, filename } = req.body;
+        if (!imageUrl || !filename) return res.status(400).json({ error: 'imageUrl and filename are required' });
+
+        const outputDir = path.join(process.cwd(), '../udarsy-admin/public/assets/Added logo');
+        if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+
+        const base64Data = imageUrl.replace(/^data:image\/\w+;base64,/, '');
+        const imageBuffer = Buffer.from(base64Data, 'base64');
+
+        const safeFilename = filename.replace(/[^a-z0-9_\-\.]/gi, '_');
+        const finalName = safeFilename.endsWith('.png') ? safeFilename : safeFilename + '.png';
+        fs.writeFileSync(path.join(outputDir, finalName), imageBuffer);
+
+        return res.json({ success: true, filename: finalName, folder: 'public/assets/Added logo' });
+    } catch (error: any) {
+        console.error('Save logo overlay error:', error);
         return res.status(500).json({ error: error.message });
     }
 });

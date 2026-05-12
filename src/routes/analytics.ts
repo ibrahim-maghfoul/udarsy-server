@@ -18,4 +18,12 @@ router.post('/event', AnalyticsController.trackEvent);
  */
 router.post('/pageview', AnalyticsController.trackPageView);
 
+/**
+ * GET /api/analytics/report?days=7
+ * Fetch GA4 reporting data (sessions, users, pageviews, bounce rate, top pages).
+ * Requires GA4_PROPERTY_ID + GA4_SERVICE_ACCOUNT_KEY env vars.
+ * Returns { configured: false } if not set up.
+ */
+router.get('/report', AnalyticsController.getReport);
+
 export default router;
