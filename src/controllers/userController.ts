@@ -6,10 +6,8 @@ import { Feedback } from '../models/Feedback';
 import { RewardRequest } from '../models/RewardRequest';
 import { Subject } from '../models/Subject';
 import { Lesson } from '../models/Lesson';
-import { config } from '../config';
 import { hashPassword, comparePassword, generateAffiliateCode } from '../utils/auth';
-import path from 'path';
-import fs from 'fs/promises';
+import { deleteFromR2, r2Url } from '../config/r2';
 
 export class UserController {
     // Admin: Get all users (paginated)
@@ -293,8 +291,8 @@ export class UserController {
                 return;
             }
 
-            // Save ONLY the filename
-            const photoURL = req.file.filename;
+            const photoURL         = r2Url((req.file as any).key);
+            const photoURLOriginal = r2Url((req.file as any).originalKey);
 
             const user = await User.findById(req.userId);
             if (!user) {
@@ -302,37 +300,16 @@ export class UserController {
                 return;
             }
 
-            // Delete old profile photo if exists and is different from the new one
-            if (user.photoURL) {
-                try {
-                    let oldPhotoPath = '';
-
-                    if (user.photoURL.includes('/')) {
-                        // Legacy: contains path
-                        const urlWithoutParams = user.photoURL.split('?')[0];
-                        const oldFilename = urlWithoutParams.split('/').pop();
-                        if (oldFilename && oldFilename !== req.file.filename) {
-                            const relativePath = urlWithoutParams.startsWith('/') ? urlWithoutParams.substring(1) : urlWithoutParams;
-                            oldPhotoPath = path.join(process.cwd(), relativePath);
-                        }
-                    } else if (user.photoURL !== req.file.filename) {
-                        // New: filename only
-                        oldPhotoPath = path.join(process.cwd(), 'data/images/profile-picture', user.photoURL);
-                    }
-
-                    if (oldPhotoPath) {
-                        await fs.access(oldPhotoPath);
-                        await fs.unlink(oldPhotoPath);
-                    }
-                } catch (err) {
-                    // Ignore errors during deletion
-                }
+            if (user.photoURL && user.photoURL !== photoURL) {
+                await deleteFromR2(user.photoURL);
+                if (user.photoURLOriginal) await deleteFromR2(user.photoURLOriginal);
             }
 
-            user.photoURL = photoURL;
+            user.photoURL         = photoURL;
+            user.photoURLOriginal = photoURLOriginal;
             await user.save();
 
-            res.json({ photoURL });
+            res.json({ photoURL, photoURLOriginal });
         } catch (error) {
             console.error('Upload photo error:', error);
             res.status(500).json({ error: 'Failed to upload photo' });
@@ -348,15 +325,8 @@ export class UserController {
                 return;
             }
 
-            // Delete profile photo if exists
             if (user.photoURL) {
-                const relativePath = user.photoURL.replace(config.backendUrl, '');
-                const photoPath = path.join(process.cwd(), relativePath);
-                try {
-                    await fs.unlink(photoPath);
-                } catch (err) {
-                    console.error('Failed to delete photo during account deletion:', err);
-                }
+                await deleteFromR2(user.photoURL);
             }
 
             await User.findByIdAndDelete(req.userId);

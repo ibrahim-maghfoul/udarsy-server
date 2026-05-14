@@ -1,247 +1,234 @@
-import multer from 'multer';
+import multer, { FileFilterCallback } from 'multer';
+import multerS3 from 'multer-s3';
+import { Request, Response, NextFunction } from 'express';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
+import sharp from 'sharp';
 import path from 'path';
-import fs from 'fs';
-import { AuthRequest } from './auth';
 import crypto from 'crypto';
+import { r2Client } from '../config/r2';
+import { config } from '../config';
 
-const PROFILE_PICTURE_DIR = path.join(process.cwd(), 'data/images/profile-picture');
-const COVER_PHOTO_DIR = path.join(process.cwd(), 'data/images/cover-photos');
-const RESOURCE_DIR = path.join(process.cwd(), 'data/resources');
-const VERIFICATION_DIR = path.join(process.cwd(), 'data/verifications');
-const VIDEO_DIR = path.join(process.cwd(), 'data/videos');
-const APPLICATIONS_DIR = path.join(process.cwd(), 'data/videos/applications');
-const DOCUMENTS_DIR = path.join(process.cwd(), 'data/documents');
+const BUCKET = config.r2.bucket;
 
-// Ensure upload directories exist
-[PROFILE_PICTURE_DIR, COVER_PHOTO_DIR, RESOURCE_DIR, VERIFICATION_DIR, VIDEO_DIR, APPLICATIONS_DIR, DOCUMENTS_DIR].forEach(dir => {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-    }
-});
+type KeyCb = (error: any, key?: string) => void;
 
-/** Sanitize filename: strip path traversal chars, null bytes, spaces, special chars */
 function safeFilename(name: string): string {
     return name
-        .replace(/\.\./g, '')       // path traversal
-        .replace(/[/\\%\x00]/g, '') // slashes, percent-encoding, null bytes
-        .replace(/[^a-zA-Z0-9._-]/g, '_') // only safe chars
-        .substring(0, 100);         // max length
+        .replace(/\.\./g, '')
+        .replace(/[/\\%\x00]/g, '')
+        .replace(/[^a-zA-Z0-9._-]/g, '_')
+        .substring(0, 100);
 }
 
-// --- Magic Bytes Lookup ---
-const MAGIC_BYTES: Record<string, Buffer> = {
-    'image/jpeg': Buffer.from([0xff, 0xd8, 0xff]),
-    'image/png': Buffer.from([0x89, 0x50, 0x4e, 0x47]),
-    'image/gif': Buffer.from([0x47, 0x49, 0x46, 0x38]),
-    'application/pdf': Buffer.from([0x25, 0x50, 0x44, 0x46]), // %PDF
-};
-
-/** Verify uploaded file content matches its claimed MIME type via magic bytes. */
-function verifyMagicBytes(mimetype: string, filePath: string): boolean {
-    const expected = MAGIC_BYTES[mimetype];
-    if (!expected) return true; // unknown type — allow, validate at filter level
-    try {
-        const fd = fs.openSync(filePath, 'r');
-        const buffer = Buffer.alloc(expected.length);
-        fs.readSync(fd, buffer, 0, expected.length, 0);
-        fs.closeSync(fd);
-        return buffer.slice(0, expected.length).equals(expected);
-    } catch {
-        return false;
-    }
+function uuid(): string {
+    return crypto.randomUUID();
 }
 
-// --- Profile Picture Upload ---
-const storage = multer.diskStorage({
-    destination: (_req, _file, cb) => {
-        cb(null, PROFILE_PICTURE_DIR);
-    },
-    filename: (_req: AuthRequest, file, cb) => {
-        // Rename to UUID to prevent filename injection
-        const uuid = crypto.randomUUID();
-        cb(null, `${uuid}${path.extname(safeFilename(file.originalname))}`);
-    },
-});
+// ─── Shared image filter ──────────────────────────────────────────────────────
 
-const imageFileFilter = (_req: any, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-    const allowedTypes = /jpeg|jpg|png|gif/;
-    const extOk = allowedTypes.test(path.extname(file.originalname).toLowerCase());
-    const mimeOk = /image\/(jpeg|png|gif)/.test(file.mimetype);
-
-    if (extOk && mimeOk) {
-        cb(null, true);
-    } else {
-        cb(new Error('Only image files (JPG, PNG, GIF) are allowed'));
-    }
+const imageFileFilter = (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
+    const extOk = /jpeg|jpg|png|gif|webp/.test(path.extname(file.originalname).toLowerCase());
+    const mimeOk = /image\/(jpeg|png|gif|webp)/.test(file.mimetype);
+    extOk && mimeOk ? cb(null, true) : cb(new Error('Only image files (JPG, PNG, GIF, WebP) are allowed'));
 };
 
-export const upload = multer({
-    storage,
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
-    fileFilter: imageFileFilter,
-});
+// ─── R2 upload helpers ────────────────────────────────────────────────────────
 
-// --- Resource Upload (PDFs + Images) ---
-const resourceStorage = multer.diskStorage({
-    destination: (_req, _file, cb) => {
-        cb(null, RESOURCE_DIR);
-    },
-    filename: (req: AuthRequest, file, cb) => {
-        const userId = req.userId || 'anonymous';
-        const title = (req.body.resourceTitle || 'resource').replace(/[^a-z0-9]/gi, '_').toLowerCase();
-        const uuid = crypto.randomUUID();
-        const ext = path.extname(safeFilename(file.originalname)).toLowerCase();
-        cb(null, `${userId}-${title}-${uuid}${ext}`);
-    },
-});
-
-const allowedResourceMimes = new Set(['application/pdf', 'image/jpeg', 'image/png']);
-
-const resourceFileFilter = (_req: any, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-    if (allowedResourceMimes.has(file.mimetype)) {
-        cb(null, true);
-    } else {
-        cb(new Error('Only PDF and Image files (JPG, PNG) are allowed'));
-    }
-};
-
-export const resourceUpload = multer({
-    storage: resourceStorage,
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
-    fileFilter: resourceFileFilter,
-});
-
-// --- Video Upload (for teacher applications) ---
-const videoStorage = multer.diskStorage({
-    destination: (_req, _file, cb) => {
-        cb(null, VIDEO_DIR);
-    },
-    filename: (req: AuthRequest, file, cb) => {
-        const userId = req.userId || 'anonymous';
-        const uuid = crypto.randomUUID();
-        const ext = path.extname(safeFilename(file.originalname)).toLowerCase();
-        cb(null, `${userId}-demo-${uuid}${ext}`);
-    },
-});
-
-const allowedVideoMimes = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
-
-const videoFileFilter = (_req: any, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-    if (allowedVideoMimes.has(file.mimetype)) {
-        cb(null, true);
-    } else {
-        cb(new Error('Only video files (MP4, WebM, MOV) are allowed'));
-    }
-};
-
-export const videoUpload = multer({
-    storage: videoStorage,
-    limits: { fileSize: 500 * 1024 * 1024 }, // 500MB for 15-min demo videos
-    fileFilter: videoFileFilter,
-});
-
-// --- Instructor Course Upload (Videos + PDFs) ---
-const courseStorage = multer.diskStorage({
-    destination: (req: AuthRequest, file, cb) => {
-        const ext = path.extname(file.originalname).toLowerCase();
-        const userId = req.userId || 'anonymous';
-
-        if (['.mp4', '.webm', '.mov', '.avi', '.mkv'].includes(ext)) {
-            // Store videos in data/videos/applications/{userId}
-            const userVideoDir = path.join(APPLICATIONS_DIR, userId);
-            if (!fs.existsSync(userVideoDir)) {
-                fs.mkdirSync(userVideoDir, { recursive: true });
-            }
-            cb(null, userVideoDir);
-        } else {
-            // Store PDFs in data/documents/{userId}
-            const userDocDir = path.join(DOCUMENTS_DIR, userId);
-            if (!fs.existsSync(userDocDir)) {
-                fs.mkdirSync(userDocDir, { recursive: true });
-            }
-            cb(null, userDocDir);
-        }
-    },
-    filename: (_req: AuthRequest, file, cb) => {
-        const ext = path.extname(safeFilename(file.originalname)).toLowerCase();
-        const uuid = crypto.randomUUID();
-        cb(null, `${uuid}${ext}`);
-    },
-});
-
-const allowedCourseMimes = new Set(['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska', 'application/pdf']);
-
-const courseFileFilter = (_req: any, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-    if (allowedCourseMimes.has(file.mimetype)) {
-        cb(null, true);
-    } else {
-        cb(new Error('Only video (MP4, WebM, MOV, AVI, MKV) and PDF files are allowed'));
-    }
-};
-
-export const courseUpload = multer({
-    storage: courseStorage,
-    limits: { fileSize: 500 * 1024 * 1024 }, // 500MB for videos
-    fileFilter: courseFileFilter,
-});
-
-// --- Cover Photo Upload ---
-const coverStorage = multer.diskStorage({
-    destination: (_req, _file, cb) => {
-        cb(null, COVER_PHOTO_DIR);
-    },
-    filename: (_req: AuthRequest, file, cb) => {
-        const uuid = crypto.randomUUID();
-        cb(null, `${uuid}${path.extname(safeFilename(file.originalname))}`);
-    },
-});
-
-export const coverUpload = multer({
-    storage: coverStorage,
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
-    fileFilter: imageFileFilter,
-});
-
-// --- Teacher Verification Document Upload (ID card, certificates — images or PDF) ---
-const verificationStorage = multer.diskStorage({
-    destination: (_req, _file, cb) => {
-        cb(null, VERIFICATION_DIR);
-    },
-    filename: (_req: AuthRequest, file, cb) => {
-        const uuid = crypto.randomUUID();
-        cb(null, `${uuid}${path.extname(safeFilename(file.originalname))}`);
-    },
-});
-
-const allowedVerificationMimes = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/gif']);
-
-const verificationFileFilter = (_req: any, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-    if (allowedVerificationMimes.has(file.mimetype)) {
-        cb(null, true);
-    } else {
-        cb(new Error('Only images (JPG, PNG) and PDF files are allowed'));
-    }
-};
-
-export const verificationUpload = multer({
-    storage: verificationStorage,
-    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
-    fileFilter: verificationFileFilter,
-});
+async function uploadToR2(body: Buffer, key: string, contentType: string): Promise<void> {
+    await r2Client.send(new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: body, ContentType: contentType }));
+}
 
 /**
- * Post-upload magic bytes verification middleware.
- * Call AFTER multer has saved the file, before the controller.
- * If the file content doesn't match its claimed MIME type, delete it and reject.
+ * Dual-save: uploads the raw original as lossless PNG to originals/ (owner only),
+ * then uploads a web-optimized WebP to the display path.
+ * Returns the display key (stored in MongoDB).
  */
-export const verifyUploadedFile = (req: any, res: any, next: any): void => {
-    if (!req.file) { next(); return; }
-    const { mimetype, path: filePath } = req.file;
-    if (!verifyMagicBytes(mimetype, filePath)) {
-        // Delete the suspicious file
-        fs.unlink(filePath, () => { });
-        res.status(400).json({ error: 'File content does not match its type. Upload rejected.' });
-        return;
+async function dualUpload(buffer: Buffer, originalKey: string, displayKey: string, options: {
+    width?: number;
+    height?: number;
+    fit?: keyof sharp.FitEnum;
+    webpQuality?: number;
+}): Promise<void> {
+    const { width, height, fit = 'inside', webpQuality = 82 } = options;
+
+    // 1 — Original: lossless PNG, full resolution, stored for owner only
+    const original = await sharp(buffer).png({ compressionLevel: 0 }).toBuffer();
+    await uploadToR2(original, originalKey, 'image/png');
+
+    // 2 — Display: resized + WebP for fast loading across the website
+    let pipeline = sharp(buffer);
+    if (width || height) pipeline = pipeline.resize(width, height, { fit, withoutEnlargement: true });
+    const display = await pipeline.webp({ quality: webpQuality }).toBuffer();
+    await uploadToR2(display, displayKey, 'image/webp');
+}
+
+// ─── Profile Picture Upload ───────────────────────────────────────────────────
+// multer collects buffer → processProfileImage middleware optimizes + uploads
+
+export const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 },
+    fileFilter: imageFileFilter,
+});
+
+export async function processProfileImage(req: any, _res: Response, next: NextFunction): Promise<void> {
+    if (!req.file) return next();
+    try {
+        const id = uuid();
+        const originalKey = `profile/original/${id}.png`;
+        const displayKey  = `profile/optimized/${id}.webp`;
+        await dualUpload(req.file.buffer, originalKey, displayKey,
+            { width: 600, height: 600, fit: 'cover', webpQuality: 85 }
+        );
+        req.file.key         = displayKey;
+        req.file.originalKey = originalKey;
+        next();
+    } catch (err) {
+        next(err);
     }
-    next();
-};
+}
+
+// ─── Cover Photo Upload ───────────────────────────────────────────────────────
+
+export const coverUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: imageFileFilter,
+});
+
+export async function processCoverImage(req: any, _res: Response, next: NextFunction): Promise<void> {
+    if (!req.file) return next();
+    try {
+        const id = uuid();
+        const originalKey = `cover/original/${id}.png`;
+        const displayKey  = `cover/optimized/${id}.webp`;
+        await dualUpload(req.file.buffer, originalKey, displayKey,
+            { width: 1920, height: 640, fit: 'cover', webpQuality: 80 }
+        );
+        req.file.key         = displayKey;
+        req.file.originalKey = originalKey;
+        next();
+    } catch (err) {
+        next(err);
+    }
+}
+
+// ─── Resource Upload (PDFs + Images for contributions) ───────────────────────
+
+export const resourceUpload = multer({
+    storage: multerS3({
+        s3: r2Client,
+        bucket: BUCKET,
+        contentType: multerS3.AUTO_CONTENT_TYPE,
+        key: (req: any, file: Express.Multer.File, cb: KeyCb) => {
+            const userId = req.userId || 'anonymous';
+            const title = (req.body?.resourceTitle || 'resource').replace(/[^a-z0-9]/gi, '_').toLowerCase();
+            const ext = path.extname(safeFilename(file.originalname)).toLowerCase();
+            cb(null, `resources/${userId}-${title}-${uuid()}${ext}`);
+        },
+    }),
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
+        const allowed = new Set(['application/pdf', 'image/jpeg', 'image/png']);
+        allowed.has(file.mimetype) ? cb(null, true) : cb(new Error('Only PDF and Image files (JPG, PNG) are allowed'));
+    },
+});
+
+// ─── Teacher Verification Document Upload ────────────────────────────────────
+// Images are optimized with sharp; PDFs are streamed directly via multer-s3
+
+export const verificationUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
+        const allowed = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/gif']);
+        allowed.has(file.mimetype) ? cb(null, true) : cb(new Error('Only images (JPG, PNG) and PDF files are allowed'));
+    },
+});
+
+export async function processVerificationDoc(req: any, _res: Response, next: NextFunction): Promise<void> {
+    if (!req.file) return next();
+    try {
+        const isPdf = req.file.mimetype === 'application/pdf';
+
+        if (isPdf) {
+            const key = `verifications/${uuid()}.pdf`;
+            await r2Client.send(new PutObjectCommand({
+                Bucket: BUCKET,
+                Key: key,
+                Body: req.file.buffer,
+                ContentType: 'application/pdf',
+            }));
+            req.file.key = key;
+        } else {
+            const id = uuid();
+            await dualUpload(req.file.buffer,
+                `verifications/original/${id}.png`,
+                `verifications/optimized/${id}.webp`,
+                { width: 2000, height: 2000, webpQuality: 90 }
+            );
+            const key = `verifications/optimized/${id}.webp`;
+            req.file.key = key;
+        }
+        next();
+    } catch (err) {
+        next(err);
+    }
+}
+
+// ─── Video Upload (teacher application demo videos) ──────────────────────────
+
+export const videoUpload = multer({
+    storage: multerS3({
+        s3: r2Client,
+        bucket: BUCKET,
+        contentType: multerS3.AUTO_CONTENT_TYPE,
+        key: (req: any, file: Express.Multer.File, cb: KeyCb) => {
+            const userId = req.userId || 'anonymous';
+            const ext = path.extname(safeFilename(file.originalname)).toLowerCase();
+            cb(null, `videos/${userId}-demo-${uuid()}${ext}`);
+        },
+    }),
+    limits: { fileSize: 500 * 1024 * 1024 },
+    fileFilter: (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
+        const allowed = new Set(['video/mp4', 'video/webm', 'video/quicktime']);
+        allowed.has(file.mimetype) ? cb(null, true) : cb(new Error('Only video files (MP4, WebM, MOV) are allowed'));
+    },
+});
+
+// ─── Instructor Course Upload (Videos + PDFs) ─────────────────────────────────
+
+export const courseUpload = multer({
+    storage: multerS3({
+        s3: r2Client,
+        bucket: BUCKET,
+        contentType: multerS3.AUTO_CONTENT_TYPE,
+        key: (req: any, file: Express.Multer.File, cb: KeyCb) => {
+            const userId = req.userId || 'anonymous';
+            const ext = path.extname(safeFilename(file.originalname)).toLowerCase();
+            const isVideo = ['.mp4', '.webm', '.mov', '.avi', '.mkv'].includes(ext);
+            const prefix = isVideo ? `videos/courses/${userId}` : `documents/courses/${userId}`;
+            cb(null, `${prefix}/${uuid()}${ext}`);
+        },
+    }),
+    limits: { fileSize: 500 * 1024 * 1024 },
+    fileFilter: (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
+        const allowed = new Set(['video/mp4', 'video/webm', 'video/quicktime', 'video/x-msvideo', 'video/x-matroska', 'application/pdf']);
+        allowed.has(file.mimetype) ? cb(null, true) : cb(new Error('Only video (MP4, WebM, MOV, AVI, MKV) and PDF files are allowed'));
+    },
+});
+
+// ─── Teacher Room File Upload ─────────────────────────────────────────────────
+
+export const roomFileUpload = multer({
+    storage: multerS3({
+        s3: r2Client,
+        bucket: BUCKET,
+        contentType: multerS3.AUTO_CONTENT_TYPE,
+        key: (_req: Request, file: Express.Multer.File, cb: KeyCb) => {
+            const safeName = safeFilename(file.originalname);
+            cb(null, `room-files/${uuid()}-${safeName}`);
+        },
+    }),
+    limits: { fileSize: 50 * 1024 * 1024 },
+});

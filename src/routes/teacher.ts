@@ -1,28 +1,12 @@
 import { Router, Response } from 'express';
 import { TeacherController } from '../controllers/teacherController';
 import { authMiddleware, adminMiddleware } from '../middleware/auth';
-import { videoUpload, verificationUpload } from '../middleware/upload';
+import { videoUpload, verificationUpload, processVerificationDoc, roomFileUpload } from '../middleware/upload';
 import { TeacherRoomMessage } from '../models/TeacherRoomMessage';
 import { TeacherRoom } from '../models/TeacherRoom';
-import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
+import { deleteFromR2, r2Url } from '../config/r2';
 
 const router = Router();
-
-// ─── Teacher room file upload setup ───────────────────────────────────────────
-const roomFilesDir = path.join(process.cwd(), 'data/room-files');
-if (!fs.existsSync(roomFilesDir)) fs.mkdirSync(roomFilesDir, { recursive: true });
-
-const roomFileStorage = multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, roomFilesDir),
-    filename: (_req, file, cb) => {
-        const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-        cb(null, `${uniqueSuffix}-${file.originalname}`);
-    },
-});
-const roomFileUpload = multer({ storage: roomFileStorage, limits: { fileSize: 50 * 1024 * 1024 } });
-
 
 // ─── APPLICATION SYSTEM ───
 router.post('/apply', authMiddleware, videoUpload.single('video'),
@@ -33,7 +17,7 @@ router.patch('/applications/:id/review', authMiddleware, adminMiddleware, Teache
 router.delete('/applications/:id', authMiddleware, adminMiddleware, TeacherController.deleteApplication);
 
 // ─── TEACHER VERIFICATION ───
-router.post('/verify', authMiddleware, verificationUpload.single('document'), TeacherController.submitVerification);
+router.post('/verify', authMiddleware, verificationUpload.single('document'), processVerificationDoc, TeacherController.submitVerification);
 router.get('/verify/me', authMiddleware, TeacherController.getMyVerification);
 router.get('/verifications', authMiddleware, adminMiddleware, TeacherController.listVerifications);
 router.patch('/verifications/:id/review', authMiddleware, adminMiddleware, TeacherController.reviewVerification);
@@ -161,18 +145,17 @@ router.post('/rooms/:id/upload', authMiddleware, roomFileUpload.single('file'), 
 
         // Only teacher of this room can upload
         if (room.teacherId.toString() !== req.userId?.toString()) {
-            if (req.file) fs.unlink(req.file.path, () => {});
+            if (req.file) await deleteFromR2((req.file as any).key);
             res.status(403).json({ error: 'Only the room teacher can upload files' }); return;
         }
 
         if (!req.file) { res.status(400).json({ error: 'File is required' }); return; }
 
-        const fileUrl = `data/room-files/${req.file.filename}`;
         const msg = await TeacherRoomMessage.create({
             roomId: id,
             sender: req.userId,
             messageType: 'file',
-            fileUrl,
+            fileUrl: r2Url((req.file as any).key),
             fileName: req.file.originalname,
             fileSize: req.file.size,
         });
@@ -186,7 +169,7 @@ router.post('/rooms/:id/upload', authMiddleware, roomFileUpload.single('file'), 
 
         res.status(201).json(populated);
     } catch (err) {
-        if (req.file) fs.unlink(req.file.path, () => {});
+        if (req.file) await deleteFromR2((req.file as any).key);
         res.status(500).json({ error: 'Failed to upload file' });
     }
 });

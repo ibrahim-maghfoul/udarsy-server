@@ -12,6 +12,7 @@ import { User } from '../models/User';
 import { News } from '../models/News';
 import { Feedback } from '../models/Feedback';
 import { cache } from '../utils/cache';
+import { r2Url } from '../config/r2';
 
 
 export class DataController {
@@ -569,8 +570,7 @@ export class DataController {
                 targetLesson = await Lesson.findById(lessonId);
             }
 
-            // Generate URL (Legacy: /data/resources/filename, New: filename)
-            const url = file.filename;
+            const url = r2Url((file as any).key);
 
             // Add resource to coursesPdf if a target lesson was found
             if (targetLesson) {

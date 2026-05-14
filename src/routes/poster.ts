@@ -1,6 +1,10 @@
 import { Router, Request, Response } from 'express';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import { r2Client, r2Url } from '../config/r2';
+import { config } from '../config';
+import { PutObjectCommand } from '@aws-sdk/client-s3';
 
 const router = Router();
 
@@ -434,16 +438,21 @@ router.post('/save-poster-image', async (req: Request, res: Response) => {
         const { imageUrl, filename } = req.body;
         if (!imageUrl || !filename) return res.status(400).json({ error: 'imageUrl and filename are required' });
 
-        const postersDir = path.join(process.cwd(), '../udarsy-admin/public/data', 'posters');
-        if (!fs.existsSync(postersDir)) fs.mkdirSync(postersDir, { recursive: true });
-
         const imgResponse = await fetch(imageUrl);
         const buffer = Buffer.from(await imgResponse.arrayBuffer());
 
         const safeFilename = filename.replace(/[^a-z0-9_\-\.]/gi, '_') + '.png';
-        fs.writeFileSync(path.join(postersDir, safeFilename), buffer);
+        const key = `posters/${crypto.randomUUID()}-${safeFilename}`;
 
-        return res.json({ filename: safeFilename, path: `/data/posters/${safeFilename}` });
+        await r2Client.send(new PutObjectCommand({
+            Bucket: config.r2.bucket,
+            Key: key,
+            Body: buffer,
+            ContentType: 'image/png',
+        }));
+
+        const url = r2Url(key);
+        return res.json({ filename: safeFilename, path: url, url });
     } catch (error: any) {
         console.error('Poster save error:', error);
         return res.status(500).json({ error: error.message });
@@ -451,24 +460,28 @@ router.post('/save-poster-image', async (req: Request, res: Response) => {
 });
 
 // ─── POST /save-logo-overlay ──────────────────────────────────────────────────
-// Saves a composited poster (with logo) to udarsy-admin/public/assets/Added logo/
 
 router.post('/save-logo-overlay', async (req: Request, res: Response) => {
     try {
         const { imageUrl, filename } = req.body;
         if (!imageUrl || !filename) return res.status(400).json({ error: 'imageUrl and filename are required' });
 
-        const outputDir = path.join(process.cwd(), '../udarsy-admin/public/assets/Added logo');
-        if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
-
         const base64Data = imageUrl.replace(/^data:image\/\w+;base64,/, '');
         const imageBuffer = Buffer.from(base64Data, 'base64');
 
         const safeFilename = filename.replace(/[^a-z0-9_\-\.]/gi, '_');
         const finalName = safeFilename.endsWith('.png') ? safeFilename : safeFilename + '.png';
-        fs.writeFileSync(path.join(outputDir, finalName), imageBuffer);
+        const key = `posters/logo-overlay/${crypto.randomUUID()}-${finalName}`;
 
-        return res.json({ success: true, filename: finalName, folder: 'public/assets/Added logo' });
+        await r2Client.send(new PutObjectCommand({
+            Bucket: config.r2.bucket,
+            Key: key,
+            Body: imageBuffer,
+            ContentType: 'image/png',
+        }));
+
+        const url = r2Url(key);
+        return res.json({ success: true, filename: finalName, url });
     } catch (error: any) {
         console.error('Save logo overlay error:', error);
         return res.status(500).json({ error: error.message });

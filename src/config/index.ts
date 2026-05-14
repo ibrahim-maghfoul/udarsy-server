@@ -48,5 +48,13 @@ export const config = {
         pass: process.env.EMAIL_PASS,
         from: process.env.EMAIL_FROM || '"Udarsy" <hello@udarsy.io>',
         adminEmail: process.env.ADMIN_EMAIL || 'ibratst1@gmail.com'
-    }
+    },
+
+    r2: {
+        accountId: process.env.R2_ACCOUNT_ID || '',
+        accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+        bucket: process.env.R2_BUCKET || '',
+        publicDomain: process.env.R2_PUBLIC_DOMAIN || '', // e.g. pub-abc123.r2.dev or cdn.udarsy.io
+    },
 };

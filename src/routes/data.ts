@@ -1,7 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { DataController } from '../controllers/dataController';
 import { authMiddleware, adminMiddleware } from '../middleware/auth';
-import { resourceUpload, verifyUploadedFile } from '../middleware/upload';
+import { resourceUpload } from '../middleware/upload';
 
 const router = Router();
 
@@ -24,7 +24,7 @@ router.get('/guidance-stats/:guidanceId', DataController.getGuidanceStats);
 router.get('/guidance-resources/:guidanceId', DataController.getGuidanceResourceCount);
 
 // --- Protected: user resource contribution ---
-router.post('/contribute', authMiddleware, resourceUpload.single('file'), verifyUploadedFile, DataController.contribute);
+router.post('/contribute', authMiddleware, resourceUpload.single('file'), DataController.contribute);
 
 // --- Public/Protected: Contributions Hub ---
 // These endpoints feed the CircleRing visualization and recent feed.

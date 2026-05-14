@@ -6,11 +6,8 @@ import { User } from '../models/User';
 import { TeacherApplication } from '../models/TeacherApplication';
 import { InstructorCourse } from '../models/InstructorCourse';
 import { InstructorRating } from '../models/InstructorRating';
-import fs from 'fs';
 import path from 'path';
-
-const PROFILE_PICTURE_DIR = path.join(process.cwd(), 'data/images/profile-picture');
-const COVER_PHOTO_DIR = path.join(process.cwd(), 'data/images/cover-photos');
+import { deleteFromR2, r2Url } from '../config/r2';
 
 export class InstructorController {
     // ─── COURSE MANAGEMENT ───
@@ -53,19 +50,14 @@ export class InstructorController {
             const ext = path.extname(req.file.originalname).toLowerCase();
             const isVideo = ['.mp4', '.webm', '.mov', '.avi', '.mkv'].includes(ext);
             const isPdf = ext === '.pdf';
-
-            // Store path relative to cwd so static serving works: data/videos/... or data/documents/...
-            const cwdNorm = process.cwd().replace(/\\/g, '/');
-            const fullNorm = req.file.path.replace(/\\/g, '/');
-            const dataIdx = fullNorm.indexOf('/data/');
-            const relativePath = dataIdx >= 0 ? fullNorm.slice(dataIdx + 1) : fullNorm.replace(cwdNorm + '/', '');
+            const fileUrl = r2Url((req.file as any).key);
 
             if (isVideo) {
-                courseData.videoUrl = relativePath;
+                courseData.videoUrl = fileUrl;
             } else if (isPdf) {
-                courseData.pdfUrl = relativePath;
+                courseData.pdfUrl = fileUrl;
             } else {
-                fs.unlink(req.file.path, () => {});
+                await deleteFromR2((req.file as any).key);
                 res.status(400).json({ error: 'Invalid file type. Use video (MP4, WebM, MOV, AVI, MKV) or PDF' });
                 return;
             }
@@ -73,7 +65,7 @@ export class InstructorController {
             const course = await InstructorCourse.create(courseData);
             res.status(201).json({ message: 'Course uploaded successfully', course });
         } catch (error) {
-            if (req.file) fs.unlink(req.file.path, () => {});
+            if (req.file) await deleteFromR2((req.file as any).key);
             res.status(500).json({ error: 'Failed to upload course' });
         }
     }
@@ -145,8 +137,8 @@ export class InstructorController {
                 return;
             }
 
-            if (course.videoUrl) fs.unlink(course.videoUrl, () => {});
-            if (course.pdfUrl) fs.unlink(course.pdfUrl, () => {});
+            if (course.videoUrl) await deleteFromR2(course.videoUrl);
+            if (course.pdfUrl) await deleteFromR2(course.pdfUrl);
 
             await InstructorCourse.findByIdAndDelete(id);
             res.json({ message: 'Course deleted' });
@@ -199,8 +191,8 @@ export class InstructorController {
         try {
             const course = await InstructorCourse.findByIdAndDelete(req.params.id);
             if (!course) { res.status(404).json({ error: 'Course not found' }); return; }
-            if (course.videoUrl) fs.unlink(course.videoUrl, () => {});
-            if (course.pdfUrl) fs.unlink(course.pdfUrl, () => {});
+            if (course.videoUrl) await deleteFromR2(course.videoUrl);
+            if (course.pdfUrl) await deleteFromR2(course.pdfUrl);
             res.json({ message: 'Course deleted' });
         } catch (error) {
             res.status(500).json({ error: 'Failed to delete course' });
@@ -234,7 +226,7 @@ export class InstructorController {
         try {
             const user = await User.findById(req.userId);
             if (!user || user.role !== 'instructor') {
-                if (req.file) fs.unlink(req.file.path, () => {});
+                if (req.file) await deleteFromR2((req.file as any).key);
                 res.status(403).json({ error: 'Instructor access required' });
                 return;
             }
@@ -243,15 +235,15 @@ export class InstructorController {
                 return;
             }
 
-            if (user.photoURL && !user.photoURL.startsWith('http')) {
-                fs.unlink(path.join(PROFILE_PICTURE_DIR, user.photoURL), () => {});
-            }
+            if (user.photoURL) await deleteFromR2(user.photoURL);
+            if (user.photoURLOriginal) await deleteFromR2(user.photoURLOriginal);
 
-            user.photoURL = req.file.filename;
+            user.photoURL         = r2Url((req.file as any).key);
+            user.photoURLOriginal = r2Url((req.file as any).originalKey);
             await user.save();
-            res.json({ photoURL: user.photoURL });
+            res.json({ photoURL: user.photoURL, photoURLOriginal: user.photoURLOriginal });
         } catch (error) {
-            if (req.file) fs.unlink(req.file.path, () => {});
+            if (req.file) await deleteFromR2((req.file as any).key);
             res.status(500).json({ error: 'Failed to update profile photo' });
         }
     }
@@ -261,7 +253,7 @@ export class InstructorController {
         try {
             const user = await User.findById(req.userId);
             if (!user || user.role !== 'instructor') {
-                if (req.file) fs.unlink(req.file.path, () => {});
+                if (req.file) await deleteFromR2((req.file as any).key);
                 res.status(403).json({ error: 'Instructor access required' });
                 return;
             }
@@ -270,15 +262,15 @@ export class InstructorController {
                 return;
             }
 
-            if (user.coverPhotoURL && !user.coverPhotoURL.startsWith('http')) {
-                fs.unlink(path.join(COVER_PHOTO_DIR, user.coverPhotoURL), () => {});
-            }
+            if (user.coverPhotoURL) await deleteFromR2(user.coverPhotoURL);
+            if (user.coverPhotoURLOriginal) await deleteFromR2(user.coverPhotoURLOriginal);
 
-            user.coverPhotoURL = req.file.filename;
+            user.coverPhotoURL         = r2Url((req.file as any).key);
+            user.coverPhotoURLOriginal = r2Url((req.file as any).originalKey);
             await user.save();
-            res.json({ coverPhotoURL: user.coverPhotoURL });
+            res.json({ coverPhotoURL: user.coverPhotoURL, coverPhotoURLOriginal: user.coverPhotoURLOriginal });
         } catch (error) {
-            if (req.file) fs.unlink(req.file.path, () => {});
+            if (req.file) await deleteFromR2((req.file as any).key);
             res.status(500).json({ error: 'Failed to update cover photo' });
         }
     }

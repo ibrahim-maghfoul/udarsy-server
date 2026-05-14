@@ -7,7 +7,8 @@ import { TeacherProfile } from '../models/TeacherProfile';
 import { TeacherRoom } from '../models/TeacherRoom';
 import { TeacherVerification } from '../models/TeacherVerification';
 import { Notification } from '../models/Notification';
-import fs from 'fs';
+import { getIO } from '../sockets/socketManager';
+import { deleteFromR2, r2Url } from '../config/r2';
 
 // Slugify a teacher display-name for the invite URL
 function slugify(name: string): string {
@@ -43,7 +44,7 @@ export class TeacherController {
 
             const existing = await TeacherApplication.findOne({ userId: req.userId, status: 'pending' });
             if (existing) {
-                fs.unlink(req.file.path, () => {});
+                await deleteFromR2((req.file as any).key);
                 res.status(400).json({ error: 'You already have a pending application' });
                 return;
             }
@@ -60,7 +61,7 @@ export class TeacherController {
                 targetLevelId: req.body.targetLevelId,
                 targetGuidanceId: req.body.targetGuidanceId,
                 targetSubjectId: req.body.targetSubjectId,
-                videoUrl: req.file.filename,
+                videoUrl: r2Url((req.file as any).key),
             });
 
             res.status(201).json({ message: 'Application submitted successfully', applicationId: application._id });
@@ -319,13 +320,14 @@ export class TeacherController {
             await room.save();
 
             // Notify the teacher
-            await Notification.create({
+            const notifJR1 = await Notification.create({
                 userId: room.teacherId,
                 type: 'join_request',
                 title: 'New join request',
                 body: `${user?.displayName ?? 'A student'} wants to join "${room.name}"`,
                 data: { roomId: room._id.toString(), roomName: room.name },
             });
+            try { getIO().to(`user_${room.teacherId}`).emit('new_notification', notifJR1); } catch {}
 
             res.status(201).json({ message: 'Join request sent. Waiting for teacher approval.' });
         } catch (error) {
@@ -368,23 +370,25 @@ export class TeacherController {
                     room.members.push(userId as any);
                     await TeacherProfile.findByIdAndUpdate(room.teacherProfileId, { $inc: { totalStudents: 1 } });
                     // Notify the student they were accepted
-                    await Notification.create({
+                    const notifAccepted = await Notification.create({
                         userId,
                         type: 'room_accepted',
                         title: 'Join request accepted',
                         body: `You've been accepted into "${room.name}"`,
                         data: { roomId: room._id.toString(), roomName: room.name },
                     });
+                    try { getIO().to(`user_${userId}`).emit('new_notification', notifAccepted); } catch {}
                 }
             } else {
                 request.status = 'rejected';
-                await Notification.create({
+                const notifRejected = await Notification.create({
                     userId,
                     type: 'room_rejected',
                     title: 'Join request declined',
                     body: `Your request to join "${room.name}" was not accepted.`,
                     data: { roomId: room._id.toString(), roomName: room.name },
                 });
+                try { getIO().to(`user_${userId}`).emit('new_notification', notifRejected); } catch {}
             }
 
             await room.save();
@@ -418,13 +422,14 @@ export class TeacherController {
             await room.save();
 
             // Notify the teacher
-            await Notification.create({
+            const notifJR2 = await Notification.create({
                 userId: room.teacherId,
                 type: 'join_request',
                 title: 'New join request',
                 body: `${user?.displayName ?? 'A student'} wants to join "${room.name}"`,
                 data: { roomId: room._id.toString(), roomName: room.name },
             });
+            try { getIO().to(`user_${room.teacherId}`).emit('new_notification', notifJR2); } catch {}
 
             res.status(201).json({ message: 'Join request sent. Waiting for teacher approval.' });
         } catch { res.status(500).json({ error: 'Failed to join room' }); }
@@ -512,39 +517,36 @@ export class TeacherController {
         try {
             const user = await User.findById(req.userId);
             if (!user) {
-                if (req.file) fs.unlink(req.file.path, () => {});
+                if (req.file) await deleteFromR2((req.file as any).key);
                 res.status(404).json({ error: 'User not found' }); return;
             }
             if (!req.file) { res.status(400).json({ error: 'Verification document is required' }); return; }
 
             const { schoolName, city, classLevel, className, subject, contactInfo, position, documentType } = req.body;
             if (!schoolName || !city || !classLevel || !subject || !contactInfo || !position || !documentType) {
-                fs.unlink(req.file.path, () => {});
+                await deleteFromR2((req.file as any).key);
                 res.status(400).json({ error: 'schoolName, city, classLevel, position, and documentType are required' }); return;
             }
 
             const allowed = ['id_card', 'certificate', 'school_letter', 'other'];
             if (!allowed.includes(documentType)) {
-                fs.unlink(req.file.path, () => {});
+                await deleteFromR2((req.file as any).key);
                 res.status(400).json({ error: 'Invalid documentType' }); return;
             }
 
+            const documentUrl = r2Url((req.file as any).key);
             const existing = await TeacherVerification.findOne({ userId: req.userId });
-            const cwdNorm = process.cwd().replace(/\\/g, '/');
-            const fullNorm = req.file.path.replace(/\\/g, '/');
-            const dataIdx = fullNorm.indexOf('/data/');
-            const relativePath = dataIdx >= 0 ? fullNorm.slice(dataIdx + 1) : fullNorm.replace(cwdNorm + '/', '');
 
             if (existing) {
                 if (existing.status === 'pending') {
-                    fs.unlink(req.file.path, () => {});
+                    await deleteFromR2((req.file as any).key);
                     res.status(409).json({ error: 'You already have a pending verification request' }); return;
                 }
                 if (existing.status === 'approved') {
-                    fs.unlink(req.file.path, () => {});
+                    await deleteFromR2((req.file as any).key);
                     res.status(409).json({ error: 'Already verified' }); return;
                 }
-                if (existing.documentUrl) fs.unlink(existing.documentUrl, () => {});
+                if (existing.documentUrl) await deleteFromR2(existing.documentUrl);
                 existing.schoolName = schoolName.trim();
                 existing.city = city.trim();
                 existing.classLevel = classLevel.trim();
@@ -552,7 +554,7 @@ export class TeacherController {
                 existing.subject = subject.trim();
                 existing.contactInfo = contactInfo.trim();
                 existing.position = position.trim();
-                existing.documentUrl = relativePath;
+                existing.documentUrl = documentUrl;
                 existing.documentType = documentType;
                 existing.status = 'pending';
                 existing.reviewNote = undefined;
@@ -569,13 +571,13 @@ export class TeacherController {
                 position: position.trim(),
                 subject: subject.trim(),
                 contactInfo: contactInfo.trim(),
-                documentUrl: relativePath,
+                documentUrl,
                 documentType,
             });
 
             res.status(201).json({ message: 'Verification submitted', verification });
         } catch (error) {
-            if (req.file) fs.unlink(req.file.path, () => {});
+            if (req.file) await deleteFromR2((req.file as any).key);
             res.status(500).json({ error: 'Failed to submit verification' });
         }
     }

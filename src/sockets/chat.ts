@@ -18,6 +18,12 @@ const teacherSocketContexts = new Map<string, { roomId: string, userId: string }
 
 export const handleChatConnection = (io: Server, socket: Socket) => {
 
+    // ── Personal notification room ────────────────────────────────────────────
+    // Client emits this immediately after connecting so we can push notifications
+    socket.on('join_user_room', (userId: string) => {
+        socket.join(`user_${userId}`);
+    });
+
     // ── General Chat Room ─────────────────────────────────────────────────────
 
     socket.on('join_room', async (data: {

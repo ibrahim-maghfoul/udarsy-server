@@ -35,7 +35,9 @@ export interface IUser extends Document {
     password: string;
     role: 'user' | 'admin' | 'instructor' | 'teacher';
     photoURL?: string;
+    photoURLOriginal?: string;
     coverPhotoURL?: string;
+    coverPhotoURLOriginal?: string;
     subscription: {
         plan: 'free' | 'premium' | 'pro';
         billingCycle: 'monthly' | 'yearly' | 'none';
@@ -114,7 +116,9 @@ const UserSchema = new Schema<IUser>({
     password: { type: String, required: true, select: false },
     role: { type: String, enum: ['user', 'admin', 'instructor', 'teacher'], default: 'user' },
     photoURL: { type: String },
+    photoURLOriginal: { type: String },
     coverPhotoURL: { type: String },
+    coverPhotoURLOriginal: { type: String },
     subscription: {
         plan: { type: String, enum: ['free', 'premium', 'pro'], default: 'free' },
         billingCycle: { type: String, enum: ['monthly', 'yearly', 'none'], default: 'none' },

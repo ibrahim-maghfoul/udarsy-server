@@ -1,4 +1,4 @@
-import express, { Application, Request, Response, NextFunction } from 'express';
+import express, { Application, Request, Response } from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
@@ -6,8 +6,6 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import cookieParser from 'cookie-parser';
 import compression from 'compression';
-import path from 'path';
-
 import { config } from './config';
 import { connectDatabase } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
@@ -33,6 +31,7 @@ import analyticsRoutes from './routes/analytics';
 import adminRoutes from './routes/admin';
 import moroccanHolidaysRoutes from './routes/moroccanHolidays';
 import { handleChatConnection } from './sockets/chat';
+import { initSocketManager } from './sockets/socketManager';
 import { verifyAccessToken } from './utils/auth';
 
 const app: Application = express();
@@ -59,6 +58,9 @@ io.use((socket, next) => {
         next(new Error('Invalid token'));
     }
 });
+
+// Initialize socket manager so controllers can emit events
+initSocketManager(io);
 
 // Setup sockets
 io.on('connection', (socket) => {
@@ -126,21 +128,6 @@ if (config.nodeEnv === 'development') {
 } else {
     app.use(morgan('combined'));
 }
-
-// Static files — public assets served with open CORS (no credentials, any origin)
-const staticOpts = { maxAge: '7d', etag: true, lastModified: true };
-app.use('/data', (_req: Request, res: Response, next: NextFunction) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    next();
-});
-app.use('/data/images', express.static(path.join(process.cwd(), 'data/images'), staticOpts));
-app.use('/data/resources', express.static(path.join(process.cwd(), 'data/resources'), staticOpts));
-app.use('/data/videos', express.static(path.join(process.cwd(), 'data/videos'), staticOpts));
-app.use('/data/documents', express.static(path.join(process.cwd(), 'data/documents'), staticOpts));
-app.use('/data/verifications', express.static(path.join(process.cwd(), 'data/verifications'), staticOpts));
-app.use('/data/posters', express.static(path.join(process.cwd(), 'data/posters'), { ...staticOpts, maxAge: '0' }));
-app.use('/data/room-files', express.static(path.join(process.cwd(), 'data/room-files'), staticOpts));
 
 // Health check endpoint
 app.get('/health', (_req: Request, res: Response) => {
