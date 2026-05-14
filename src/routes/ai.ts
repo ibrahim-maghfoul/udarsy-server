@@ -268,8 +268,8 @@ router.post('/explain', authMiddleware, async (req: AuthRequest, res: Response) 
 
         const data = await response.json() as any;
         if (!response.ok) {
-            const msg = data.error?.message || `OpenAI error ${response.status}`;
-            return res.status(500).json({ error: msg });
+            console.error('OpenAI Explain Error:', data.error?.message || `OpenAI error ${response.status}`);
+            return res.status(500).json({ error: "Something went wrong. Please try again later." });
         }
 
         const answer = data.choices?.[0]?.message?.content;
@@ -365,7 +365,8 @@ Answer only the student's question based on this document. Be precise and pedago
 
         const data = await response.json() as any;
         if (!response.ok) {
-            return res.status(500).json({ error: data.error?.message || `OpenAI error ${response.status}` });
+            console.error('OpenAI Ask Error:', data.error?.message || `OpenAI error ${response.status}`);
+            return res.status(500).json({ error: "Something went wrong. Please try again later." });
         }
 
         const answer = data.choices?.[0]?.message?.content;
@@ -374,6 +375,71 @@ Answer only the student's question based on this document. Be precise and pedago
         return res.json({ answer, language: resolvedLang });
     } catch (err: any) {
         console.error('AI ask error:', err);
+        return res.status(500).json({ error: err.message });
+    }
+});
+
+// POST /api/ai/contribution-hint — generate a short contribution description (auth required)
+// Body: { resourceTitle, subjectTitle, lessonTitle?, language? }
+router.post('/contribution-hint', authMiddleware, async (req: AuthRequest, res: Response) => {
+    try {
+        if (!req.userId) return res.status(401).json({ error: 'Authentication required' });
+
+        const { resourceTitle, subjectTitle, lessonTitle, language = 'fr' } = req.body;
+        if (!resourceTitle?.trim()) return res.status(400).json({ error: 'resourceTitle is required' });
+
+        const openaiKey = process.env.OPENAI_API_KEY;
+        if (!openaiKey) return res.status(503).json({ error: 'AI service not configured' });
+
+        const lessonPart = lessonTitle ? ` — ${lessonTitle}` : '';
+
+        const prompts: Record<string, string> = {
+            fr: `Un élève marocain partage une ressource éducative sur la plateforme Udarsy.
+Matière : ${subjectTitle || 'Non spécifié'}
+Leçon : ${lessonTitle || 'Non spécifié'}
+Titre de la ressource : "${resourceTitle}"
+
+Rédige une courte note (2-3 phrases max) que l'élève peut utiliser pour décrire sa contribution. Elle doit expliquer ce que contient la ressource et comment elle peut aider d'autres élèves. Parle à la première personne, de façon naturelle et simple. Ne commence pas par "Je partage".`,
+
+            ar: `طالب مغربي يشارك موردًا تعليميًا على منصة أدرسي.
+المادة : ${subjectTitle || 'غير محدد'}
+الدرس : ${lessonTitle || 'غير محدد'}
+عنوان المورد : "${resourceTitle}"
+
+اكتب ملاحظة قصيرة (2-3 جمل كحد أقصى) يمكن للطالب استخدامها لوصف مساهمته. يجب أن تشرح ما تحتويه المورد وكيف يمكن أن تساعد الطلاب الآخرين. تحدث بضمير المتكلم بشكل طبيعي وبسيط.`,
+
+            en: `A Moroccan student is sharing an educational resource on the Udarsy platform.
+Subject: ${subjectTitle || 'Not specified'}
+Lesson: ${lessonTitle || 'Not specified'}
+Resource title: "${resourceTitle}"
+
+Write a short note (2-3 sentences max) the student can use to describe their contribution. It should explain what the resource contains and how it can help other students. Write in first person, naturally and simply. Don't start with "I'm sharing".`,
+        };
+
+        const prompt = prompts[language] || prompts['fr'];
+
+        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${openaiKey}`,
+            },
+            body: JSON.stringify({
+                model: 'gpt-4o-mini',
+                messages: [{ role: 'user', content: prompt }],
+                max_tokens: 200,
+                temperature: 0.7,
+            }),
+        });
+
+        const data = await response.json() as any;
+        if (!response.ok) return res.status(500).json({ error: 'AI service error' });
+
+        const hint = data.choices?.[0]?.message?.content?.trim();
+        if (!hint) return res.status(500).json({ error: 'Empty response from AI' });
+
+        return res.json({ hint });
+    } catch (err: any) {
         return res.status(500).json({ error: err.message });
     }
 });

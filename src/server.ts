@@ -9,7 +9,7 @@ import compression from 'compression';
 import { config } from './config';
 import { connectDatabase } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
-import { sanitizeInputs, sanitizeStrings, authRateLimiter, generalRateLimiter } from './middleware/security';
+import { sanitizeInputs, sanitizeStrings, authRateLimiter, generalRateLimiter, validateApiKey } from './middleware/security';
 
 // Import routes
 import authRoutes from './routes/auth';
@@ -115,6 +115,9 @@ app.use(compression());
 // ----- INPUT SANITIZATION (apply globally after body parsing) -----
 app.use(sanitizeInputs);    // Strip MongoDB operators from all inputs
 app.use(sanitizeStrings);   // Strip HTML tags from string fields
+
+// ----- API KEY VALIDATION -----
+app.use('/api', validateApiKey);
 
 // ----- RATE LIMITING -----
 // Stricter rate limit for auth endpoints (brute-force protection)

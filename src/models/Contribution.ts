@@ -3,6 +3,7 @@ import mongoose, { Schema, Document } from 'mongoose';
 export interface IContribution extends Document {
     userId: string;
     resourceTitle: string;
+    notes?: string;
     url: string;
     subjectId: string;
     lessonId: string;
@@ -14,6 +15,7 @@ export interface IContribution extends Document {
 const ContributionSchema = new Schema<IContribution>({
     userId: { type: String, required: true, index: true },
     resourceTitle: { type: String, required: true },
+    notes: { type: String, default: '' },
     url: { type: String, required: true },
     subjectId: { type: String, required: true },
     lessonId: { type: String, required: true },

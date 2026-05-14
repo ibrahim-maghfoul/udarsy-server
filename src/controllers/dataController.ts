@@ -545,7 +545,7 @@ export class DataController {
     // Contribute Resource
     static async contribute(req: AuthRequest, res: Response): Promise<void> {
         try {
-            const { subjectId, lessonId, newLessonTitle, resourceTitle } = req.body;
+            const { subjectId, lessonId, newLessonTitle, resourceTitle, notes } = req.body;
             const file = req.file;
 
             if (!file || !subjectId || !resourceTitle) {
@@ -587,10 +587,11 @@ export class DataController {
             const contribution = new Contribution({
                 userId: req.userId,
                 resourceTitle,
+                notes: notes?.trim() || '',
                 url: url,
                 subjectId,
                 lessonId: targetLesson ? targetLesson._id : 'general',
-                status: 'pending' // Default status
+                status: 'pending'
             });
             await contribution.save();
 
