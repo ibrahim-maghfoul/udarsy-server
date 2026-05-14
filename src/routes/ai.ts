@@ -391,8 +391,6 @@ router.post('/contribution-hint', authMiddleware, async (req: AuthRequest, res: 
         const openaiKey = process.env.OPENAI_API_KEY;
         if (!openaiKey) return res.status(503).json({ error: 'AI service not configured' });
 
-        const lessonPart = lessonTitle ? ` — ${lessonTitle}` : '';
-
         const prompts: Record<string, string> = {
             fr: `Un élève marocain partage une ressource éducative sur la plateforme Udarsy.
 Matière : ${subjectTitle || 'Non spécifié'}
