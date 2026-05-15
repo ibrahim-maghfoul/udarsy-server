@@ -315,25 +315,30 @@ export class ProgressController {
         try {
             const { subjectId } = req.params;
 
-            const user = await User.findById(req.userId).select('progress.lessons').lean();
-            if (!user?.progress?.lessons) {
-                res.json({ completedResources: 0, totalResources: 0, progressPercentage: 0 });
-                return;
+            // Get true total from Lesson collection (not user progress, which only covers visited lessons)
+            const lessons = await Lesson.find({ subjectId }, 'coursesPdf videos exercices exams resourses').lean();
+            let totalResources = 0;
+            for (const lesson of lessons) {
+                totalResources += (lesson.coursesPdf?.length || 0) +
+                    (lesson.videos?.length || 0) +
+                    (lesson.exercices?.length || 0) +
+                    (lesson.exams?.length || 0) +
+                    (lesson.resourses?.length || 0);
             }
 
+            const user = await User.findById(req.userId).select('progress.lessons').lean();
             let completedResources = 0;
-            let totalResources = 0;
-
-            for (const lesson of user.progress.lessons) {
-                if (lesson.subjectId === subjectId) {
-                    completedResources += lesson.completedResources.length;
-                    totalResources += lesson.totalResourcesCount;
+            if (user?.progress?.lessons) {
+                for (const lp of user.progress.lessons) {
+                    if (lp.subjectId === subjectId) {
+                        completedResources += lp.completedResources.length;
+                    }
                 }
             }
 
             const progressPercentage = totalResources > 0 ? Math.round((completedResources / totalResources) * 100) : 0;
 
-            res.json({ completedResources, totalResources, progressPercentage });
+            res.json({ completedResources, totalResources, progressPercentage, lessonCount: lessons.length });
         } catch (error) {
             console.error('Get subject progress error:', error);
             res.status(500).json({ error: 'Failed to get subject progress' });

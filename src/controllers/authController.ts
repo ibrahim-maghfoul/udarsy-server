@@ -14,18 +14,14 @@ export class AuthController {
             .matches(/[A-Z]/).withMessage('Password must contain at least one uppercase letter')
             .matches(/[0-9]/).withMessage('Password must contain at least one number'),
         body('displayName')
-            .notEmpty().withMessage('Display name is required')
-            .isLength({ max: 60 }).withMessage('Display name too long')
-            .trim(),
-        body('nickname')
-            .notEmpty().withMessage('Nickname is required')
-            .isLength({ max: 30 }).withMessage('Nickname too long')
+            .notEmpty().withMessage('Full name is required')
+            .isLength({ max: 60 }).withMessage('Name is too long (max 60 characters)')
             .trim(),
         body('gender').optional().isIn(['male', 'female']).withMessage('Invalid gender'),
     ];
 
     static loginValidation = [
-        body('email').isEmail().withMessage('Valid email is required'),
+        body('email').isEmail().withMessage('Please enter a valid email address'),
         body('password').notEmpty().withMessage('Password is required'),
     ];
 
@@ -38,11 +34,11 @@ export class AuthController {
                 return;
             }
 
-            const { email, password, displayName, nickname, gender, referralCode } = req.body;
+            const { email, password, displayName, gender, referralCode } = req.body;
 
             const existingUser = await User.findOne({ email });
             if (existingUser) {
-                res.status(400).json({ error: 'Email already registered' });
+                res.status(400).json({ error: 'This email is already registered' });
                 return;
             }
 
@@ -55,7 +51,6 @@ export class AuthController {
                 email,
                 password: hashedPassword,
                 displayName,
-                nickname,
                 gender,
                 affiliateCode,
                 referredBy: referralCode || undefined,
@@ -122,14 +117,9 @@ export class AuthController {
         } catch (error: any) {
             console.error('Register error details:', {
                 message: error.message,
-                stack: error.stack,
                 name: error.name,
-                errors: error.errors // Mongoose validation errors
             });
-            res.status(500).json({
-                error: 'Registration failed',
-                details: process.env.NODE_ENV === 'development' ? error.message : undefined
-            });
+            res.status(500).json({ error: 'Something went wrong. Please try again.' });
         }
     }
 

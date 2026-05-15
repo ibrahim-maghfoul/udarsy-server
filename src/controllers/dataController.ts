@@ -15,6 +15,22 @@ import { cache } from '../utils/cache';
 import { r2Url } from '../config/r2';
 
 
+function generateSlug(title: string): string {
+    const stripNonSlug = new RegExp('[^a-z0-9\\u0600-\\u06FF-]', 'g');
+    const nfd = title.toLowerCase().normalize('NFD');
+    let stripped = '';
+    for (const ch of nfd) {
+        const cp = ch.codePointAt(0)!;
+        if (cp >= 0x0300 && cp <= 0x036F) continue;
+        stripped += ch;
+    }
+    return stripped
+        .replace(/\s+/g, '-')
+        .replace(stripNonSlug, '')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '') || 'subject';
+}
+
 export class DataController {
     // Get all schools (cached — rarely changes)
     static async getSchools(_req: AuthRequest, res: Response): Promise<void> {
@@ -80,7 +96,42 @@ export class DataController {
             const cached = cache.get<any[]>(CACHE_KEY);
             if (cached) { res.json(cached); return; }
 
-            const subjects = await Subject.find({ guidanceId }).sort({ title: 1 }).lean();
+            const raw = await Subject.aggregate([
+                { $match: { guidanceId } },
+                {
+                    $lookup: {
+                        from: 'lessons',
+                        localField: '_id',
+                        foreignField: 'subjectId',
+                        as: '_lessons',
+                    },
+                },
+                {
+                    $addFields: {
+                        lessonCount: { $size: '$_lessons' },
+                        totalResources: {
+                            $sum: {
+                                $map: {
+                                    input: '$_lessons',
+                                    as: 'l',
+                                    in: {
+                                        $add: [
+                                            { $size: { $ifNull: ['$$l.coursesPdf', []] } },
+                                            { $size: { $ifNull: ['$$l.videos', []] } },
+                                            { $size: { $ifNull: ['$$l.exercices', []] } },
+                                            { $size: { $ifNull: ['$$l.exams', []] } },
+                                            { $size: { $ifNull: ['$$l.resourses', []] } },
+                                        ],
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+                { $project: { _lessons: 0 } },
+                { $sort: { title: 1 } },
+            ]);
+            const subjects = raw.map(s => ({ ...s, slug: generateSlug(s.title) }));
             cache.set(CACHE_KEY, subjects);
             res.json(subjects);
         } catch (error) {
@@ -89,7 +140,44 @@ export class DataController {
         }
     }
 
-    // Get lessons by subject (cached)
+    // Get subject by slug — title-based scan (subjects are few, cached globally)
+    static async getGuidanceBySlug(req: AuthRequest, res: Response): Promise<void> {
+        try {
+            const { slug } = req.params;
+            const CACHE_KEY = 'curriculum:all-guidances';
+            let all = cache.get<any[]>(CACHE_KEY);
+            if (!all) {
+                all = await Guidance.find().lean();
+                cache.set(CACHE_KEY, all, 300);
+            }
+            const guidance = all!.find((g: any) => generateSlug(g.title) === slug);
+            if (!guidance) { res.status(404).json({ error: 'Guidance not found' }); return; }
+            res.json({ ...guidance, slug });
+        } catch (error) {
+            console.error('Get guidance by slug error:', error);
+            res.status(500).json({ error: 'Failed to get guidance' });
+        }
+    }
+
+    static async getSubjectBySlug(req: AuthRequest, res: Response): Promise<void> {
+        try {
+            const { slug } = req.params;
+            const CACHE_KEY = 'curriculum:all-subjects';
+            let all = cache.get<any[]>(CACHE_KEY);
+            if (!all) {
+                all = await Subject.find().lean();
+                cache.set(CACHE_KEY, all, 300);
+            }
+            const subject = all.find((s: any) => generateSlug(s.title) === slug);
+            if (!subject) { res.status(404).json({ error: 'Subject not found' }); return; }
+            res.json({ ...subject, slug });
+        } catch (error) {
+            console.error('Get subject by slug error:', error);
+            res.status(500).json({ error: 'Failed to get subject' });
+        }
+    }
+
+    // Get lessons by subject (cached) — includes slug field
     static async getLessons(req: AuthRequest, res: Response): Promise<void> {
         try {
             const { subjectId } = req.params;
@@ -99,12 +187,47 @@ export class DataController {
             const cached = cache.get<any[]>(CACHE_KEY);
             if (cached) { res.json(cached); return; }
 
-            const lessons = await Lesson.find({ subjectId }).sort({ title: 1 }).lean();
+            const raw = await Lesson.find({ subjectId }).sort({ title: 1 }).lean();
+            const lessons = raw.map(l => ({ ...l, slug: generateSlug((l as any).title) }));
             cache.set(CACHE_KEY, lessons);
             res.json(lessons);
         } catch (error) {
             console.error('Get lessons error:', error);
             res.status(500).json({ error: 'Failed to get lessons' });
+        }
+    }
+
+    // Get lesson by slug — two-phase: lightweight slug index → full lesson by _id
+    static async getLessonBySlug(req: AuthRequest, res: Response): Promise<void> {
+        try {
+            const { slug } = req.params;
+
+            // Per-slug cache: zero DB cost on repeat visits (1hr TTL)
+            const SLUG_CACHE = `lesson:slug:${slug}`;
+            const cached = cache.get<any>(SLUG_CACHE);
+            if (cached) { res.json(cached); return; }
+
+            // Lightweight slug index: only title + _id + subjectId (far smaller than full docs)
+            const INDEX_CACHE = 'curriculum:lesson-slug-index';
+            let index = cache.get<Array<{ _id: string; title: string; subjectId: string }>>(INDEX_CACHE);
+            if (!index) {
+                index = (await Lesson.find({}, { title: 1, subjectId: 1 }).lean()) as any[];
+                cache.set(INDEX_CACHE, index, 3600); // 1 hour — slugs don't change
+            }
+
+            const meta = (index as any[]).find((l: any) => generateSlug(l.title) === slug);
+            if (!meta) { res.status(404).json({ error: 'Lesson not found' }); return; }
+
+            // Fetch full lesson by _id (indexed)
+            const lesson = await Lesson.findById(meta._id).lean();
+            if (!lesson) { res.status(404).json({ error: 'Lesson not found' }); return; }
+
+            const result = { ...lesson, slug };
+            cache.set(SLUG_CACHE, result, 3600); // cache full lesson per-slug for 1 hour
+            res.json(result);
+        } catch (error) {
+            console.error('Get lesson by slug error:', error);
+            res.status(500).json({ error: 'Failed to get lesson' });
         }
     }
 
@@ -120,7 +243,7 @@ export class DataController {
                 return;
             }
 
-            res.json(lesson);
+            res.json({ ...lesson, slug: generateSlug((lesson as any).title) });
         } catch (error) {
             console.error('Get lesson error:', error);
             res.status(500).json({ error: 'Failed to get lesson' });
