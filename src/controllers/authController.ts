@@ -1,8 +1,10 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
 import { body, validationResult } from 'express-validator';
+import crypto from 'crypto';
 import { User } from '../models/User';
 import { hashPassword, comparePassword, generateAccessToken, generateRefreshToken, hashRefreshToken, generateAffiliateCode, generateSessionId } from '../utils/auth';
+import { sendVerificationEmail, sendPasswordResetEmail } from '../utils/email';
 import { config } from '../config';
 
 export class AuthController {
@@ -77,6 +79,11 @@ export class AuthController {
                 );
             }
 
+            // Generate email verification token
+            const verificationToken = crypto.randomBytes(32).toString('hex');
+            user.verificationToken = verificationToken;
+            user.verificationTokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+
             const sessionId = generateSessionId();
             const accessToken = generateAccessToken(user._id.toString(), sessionId);
             const refreshToken = generateRefreshToken(user._id.toString());
@@ -84,6 +91,11 @@ export class AuthController {
             user.refreshToken = hashRefreshToken(refreshToken);
             user.sessionId = sessionId;
             await user.save();
+
+            // Send verification email (non-blocking)
+            sendVerificationEmail(user.email, verificationToken).catch((err) =>
+                console.error('Failed to send verification email:', err)
+            );
 
             res.cookie('token', accessToken, {
                 httpOnly: true,
@@ -100,7 +112,6 @@ export class AuthController {
                     photoURL: user.photoURL,
                     subscription: user.subscription,
                     phone: user.phone,
-                    nickname: user.nickname,
                     city: user.city,
                     age: user.age,
                     gender: user.gender,
@@ -111,6 +122,7 @@ export class AuthController {
                     isPremium: user.isPremium,
                     settings: user.settings,
                     points: user.points,
+                    isVerified: false,
                 },
                 token: accessToken,
             });
@@ -178,7 +190,6 @@ export class AuthController {
                     level: user.level,
                     selectedPath: user.selectedPath,
                     phone: user.phone,
-                    nickname: user.nickname,
                     city: user.city,
                     age: user.age,
                     gender: user.gender,
@@ -189,6 +200,7 @@ export class AuthController {
                     isPremium: user.isPremium,
                     settings: user.settings,
                     points: user.points,
+                    isVerified: user.isVerified,
                 },
                 token: accessToken,
             });
@@ -312,7 +324,6 @@ export class AuthController {
                     level: user.level,
                     selectedPath: user.selectedPath,
                     phone: user.phone,
-                    nickname: user.nickname,
                     city: user.city,
                     age: user.age,
                     gender: user.gender,
@@ -327,6 +338,146 @@ export class AuthController {
         } catch (error) {
             console.error('Google login error:', error);
             res.status(500).json({ error: 'Google login failed' });
+        }
+    }
+
+    // Verify email with token
+    static async verifyEmail(req: AuthRequest, res: Response): Promise<void> {
+        try {
+            const { token } = req.body;
+            if (!token) {
+                res.status(400).json({ error: 'Verification token is required' });
+                return;
+            }
+
+            const user = await User.findOne({
+                verificationToken: token,
+                verificationTokenExpiry: { $gt: new Date() },
+            }).select('+verificationToken +verificationTokenExpiry');
+
+            if (!user) {
+                res.status(400).json({ error: 'Invalid or expired verification link' });
+                return;
+            }
+
+            user.isVerified = true;
+            user.verificationToken = undefined;
+            user.verificationTokenExpiry = undefined;
+            await user.save();
+
+            res.json({ message: 'Email verified successfully' });
+        } catch (error) {
+            console.error('Verify email error:', error);
+            res.status(500).json({ error: 'Verification failed' });
+        }
+    }
+
+    // Resend verification email
+    static async resendVerification(req: AuthRequest, res: Response): Promise<void> {
+        try {
+            const { email } = req.body;
+            if (!email) {
+                res.status(400).json({ error: 'Email is required' });
+                return;
+            }
+
+            const user = await User.findOne({ email: email.toLowerCase().trim() })
+                .select('+verificationToken +verificationTokenExpiry');
+
+            // Always return success to avoid email enumeration
+            if (!user || user.isVerified) {
+                res.json({ message: 'If your email is registered and unverified, you will receive a new link.' });
+                return;
+            }
+
+            const verificationToken = crypto.randomBytes(32).toString('hex');
+            user.verificationToken = verificationToken;
+            user.verificationTokenExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000);
+            await user.save();
+
+            sendVerificationEmail(user.email, verificationToken).catch((err) =>
+                console.error('Failed to send verification email:', err)
+            );
+
+            res.json({ message: 'If your email is registered and unverified, you will receive a new link.' });
+        } catch (error) {
+            console.error('Resend verification error:', error);
+            res.status(500).json({ error: 'Failed to resend verification email' });
+        }
+    }
+
+    // Request password reset
+    static async forgotPassword(req: AuthRequest, res: Response): Promise<void> {
+        try {
+            const { email } = req.body;
+            if (!email) {
+                res.status(400).json({ error: 'Email is required' });
+                return;
+            }
+
+            const user = await User.findOne({ email: email.toLowerCase().trim() })
+                .select('+resetPasswordToken +resetPasswordTokenExpiry');
+
+            // Always return success to avoid email enumeration
+            if (!user) {
+                res.json({ message: 'If that email is registered, you will receive a reset link.' });
+                return;
+            }
+
+            const resetToken = crypto.randomBytes(32).toString('hex');
+            user.resetPasswordToken = resetToken;
+            user.resetPasswordTokenExpiry = new Date(Date.now() + 60 * 60 * 1000); // 1h
+            await user.save();
+
+            sendPasswordResetEmail(user.email, resetToken).catch((err) =>
+                console.error('Failed to send password reset email:', err)
+            );
+
+            res.json({ message: 'If that email is registered, you will receive a reset link.' });
+        } catch (error) {
+            console.error('Forgot password error:', error);
+            res.status(500).json({ error: 'Failed to send reset email' });
+        }
+    }
+
+    // Reset password with token
+    static async resetPassword(req: AuthRequest, res: Response): Promise<void> {
+        try {
+            const { token, password } = req.body;
+
+            if (!token || !password) {
+                res.status(400).json({ error: 'Token and new password are required' });
+                return;
+            }
+
+            if (password.length < 8 || !/[A-Z]/.test(password) || !/[0-9]/.test(password)) {
+                res.status(400).json({ error: 'Password must be at least 8 characters with one uppercase letter and one number' });
+                return;
+            }
+
+            const user = await User.findOne({
+                resetPasswordToken: token,
+                resetPasswordTokenExpiry: { $gt: new Date() },
+            }).select('+password +resetPasswordToken +resetPasswordTokenExpiry');
+
+            if (!user) {
+                res.status(400).json({ error: 'Invalid or expired reset link' });
+                return;
+            }
+
+            user.password = await hashPassword(password);
+            user.resetPasswordToken = undefined;
+            user.resetPasswordTokenExpiry = undefined;
+            // Invalidate all sessions
+            user.refreshToken = undefined;
+            user.sessionId = undefined;
+            await user.save();
+
+            res.clearCookie('token');
+            res.json({ message: 'Password reset successfully. Please log in with your new password.' });
+        } catch (error) {
+            console.error('Reset password error:', error);
+            res.status(500).json({ error: 'Password reset failed' });
         }
     }
 }

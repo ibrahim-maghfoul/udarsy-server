@@ -89,5 +89,6 @@ TeacherRoomSchema.pre('validate', function (next) {
 
 TeacherRoomSchema.index({ guidanceId: 1, subjectId: 1 });
 TeacherRoomSchema.index({ 'joinRequests.status': 1 });
+TeacherRoomSchema.index({ members: 1 }); // getJoinedRooms queries members array
 
 export const TeacherRoom = mongoose.model<ITeacherRoom>('TeacherRoom', TeacherRoomSchema);

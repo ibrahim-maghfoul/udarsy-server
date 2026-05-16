@@ -33,6 +33,7 @@ import moroccanHolidaysRoutes from './routes/moroccanHolidays';
 import { handleChatConnection } from './sockets/chat';
 import { initSocketManager } from './sockets/socketManager';
 import { verifyAccessToken } from './utils/auth';
+import { ensureLogoUploaded } from './utils/email';
 
 const app: Application = express();
 const server = http.createServer(app);
@@ -168,6 +169,7 @@ app.use(errorHandler);
 const PORT = config.port;
 server.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT} in ${config.nodeEnv} mode`);
+    ensureLogoUploaded();
     console.log(`📍 Health check: http://localhost:${PORT}/health`);
     console.log(`🔒 Security middleware: NoSQL sanitizer, rate limiter, helmet enabled`);
     console.log(`💬 Socket.io real-time chat enabled`);

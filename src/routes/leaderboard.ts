@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
 import { User } from '../models/User';
 import { MonthlyRank } from '../models/MonthlyRank';
+import { cache } from '../utils/cache';
 
 const router = express.Router();
 
@@ -20,13 +21,18 @@ router.get('/monthly', authMiddleware, async (req: Request, res: Response): Prom
         const month = (req.query.month as string) ||
             new Date().toISOString().slice(0, 7); // "YYYY-MM"
 
+        // In-memory cache for the current month's leaderboard (5 min)
+        const cacheKey = `leaderboard:monthly:${month}`;
+        const cached = cache.get<any>(cacheKey);
+        if (cached) { res.json(cached); return; }
+
         let rank = await MonthlyRank.findOne({ month }).lean();
 
-        // If not computed yet (or live month requested), compute now
         if (!rank) {
             rank = await computeAndSaveRank(month);
         }
 
+        cache.set(cacheKey, rank, 5 * 60_000);
         res.json(rank);
     } catch (err) {
         console.error('Leaderboard error:', err);

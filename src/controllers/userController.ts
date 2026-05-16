@@ -8,6 +8,7 @@ import { Subject } from '../models/Subject';
 import { Lesson } from '../models/Lesson';
 import { hashPassword, comparePassword, generateAffiliateCode } from '../utils/auth';
 import { deleteFromR2, r2Url } from '../config/r2';
+import { cache } from '../utils/cache';
 
 export class UserController {
     // Admin: Get all users (paginated)
@@ -69,66 +70,70 @@ export class UserController {
     // Get user profile
     static async getProfile(req: AuthRequest, res: Response): Promise<void> {
         try {
-            const user = await User.findById(req.userId);
+            const user = await User.findById(req.userId)
+                .select('-calendar -refreshToken -sessionId -verificationToken -verificationTokenExpiry -resetPasswordToken -resetPasswordTokenExpiry')
+                .lean();
 
             if (!user) {
                 res.status(404).json({ error: 'User not found' });
                 return;
             }
 
+            // Guidance resource count is the same for everyone in the same guidance — cache it
             let totalGuidanceResources = 0;
-            if (user.selectedPath && user.selectedPath.guidanceId) {
-                try {
-                    const subjects = await Subject.find({ guidanceId: user.selectedPath.guidanceId }, '_id').lean();
-                    const subjectIds = subjects.map(s => s._id);
-
-                    if (subjectIds.length > 0) {
-                        const countResult = await Lesson.aggregate([
-                            { $match: { subjectId: { $in: subjectIds } } },
-                            { $project: {
-                                totalRes: {
-                                    $add: [
-                                        { $size: { $ifNull: ["$coursesPdf", []] } },
-                                        { $size: { $ifNull: ["$videos", []] } },
-                                        { $size: { $ifNull: ["$exercices", []] } },
-                                        { $size: { $ifNull: ["$exams", []] } },
-                                        { $size: { $ifNull: ["$resourses", []] } }
-                                    ]
-                                }
-                            }},
-                            { $group: { _id: null, total: { $sum: "$totalRes" } } }
-                        ]);
-                        if (countResult && countResult.length > 0) {
-                            totalGuidanceResources = countResult[0].total;
+            const guidanceId = (user as any).selectedPath?.guidanceId;
+            if (guidanceId) {
+                const cacheKey = `guidance:resources:${guidanceId}`;
+                const cached = cache.get<number>(cacheKey);
+                if (cached !== null) {
+                    totalGuidanceResources = cached;
+                } else {
+                    try {
+                        const subjects = await Subject.find({ guidanceId }, '_id').lean();
+                        const subjectIds = subjects.map(s => s._id);
+                        if (subjectIds.length > 0) {
+                            const countResult = await Lesson.aggregate([
+                                { $match: { subjectId: { $in: subjectIds } } },
+                                { $project: { totalRes: { $add: [
+                                    { $size: { $ifNull: ['$coursesPdf', []] } },
+                                    { $size: { $ifNull: ['$videos', []] } },
+                                    { $size: { $ifNull: ['$exercices', []] } },
+                                    { $size: { $ifNull: ['$exams', []] } },
+                                    { $size: { $ifNull: ['$resourses', []] } },
+                                ]}}},
+                                { $group: { _id: null, total: { $sum: '$totalRes' } } },
+                            ]);
+                            totalGuidanceResources = countResult[0]?.total ?? 0;
                         }
+                        cache.set(cacheKey, totalGuidanceResources, 10 * 60_000); // 10 min
+                    } catch (err) {
+                        console.error('Failed to compute guidance total resources', err);
                     }
-                } catch (err) {
-                    console.error('Failed to compute guidance total resources', err);
                 }
             }
 
+            const u = user as any;
             res.json({
-                id: user._id,
-                email: user.email,
-                displayName: user.displayName,
-                photoURL: user.photoURL,
-                isPremium: user.isPremium,
-                level: user.level,
-                subscription: user.subscription,
-                progress: user.progress,
-                settings: user.settings,
-                selectedPath: user.selectedPath,
-                phone: user.phone,
-                nickname: user.nickname,
-                city: user.city,
-                age: user.age,
-                birthday: user.birthday,
-                gender: user.gender,
-                schoolName: user.schoolName,
-                studyLocation: user.studyLocation,
-                role: user.role,
-                points: user.points,
-                coverPhotoURL: user.coverPhotoURL,
+                id: u._id,
+                email: u.email,
+                displayName: u.displayName,
+                photoURL: u.photoURL,
+                isPremium: u.subscription?.plan === 'premium' || u.subscription?.plan === 'pro',
+                level: u.level,
+                subscription: u.subscription,
+                progress: u.progress,
+                settings: u.settings,
+                selectedPath: u.selectedPath,
+                phone: u.phone,
+                city: u.city,
+                age: u.age,
+                birthday: u.birthday,
+                gender: u.gender,
+                schoolName: u.schoolName,
+                studyLocation: u.studyLocation,
+                role: u.role,
+                points: u.points,
+                coverPhotoURL: u.coverPhotoURL,
                 totalGuidanceResources,
             });
         } catch (error) {
@@ -144,7 +149,6 @@ export class UserController {
             const allowedUpdates = [
                 'displayName',
                 'phone',
-                'nickname',
                 'city',
                 'age',
                 'birthday',
@@ -160,13 +164,18 @@ export class UserController {
             Object.keys(updates).forEach(key => {
                 if (allowedUpdates.includes(key)) {
                     const value = updates[key];
-                    // Don't update with empty string for fields that have specific types or constraints
-                    if (value === "" && (key === 'age' || key === 'gender')) {
-                        return;
-                    }
+                    if (value === "" && (key === 'age' || key === 'gender')) return;
                     filteredUpdates[key] = value;
                 }
             });
+
+            // Only allow avatar paths for photoURL (not arbitrary URLs)
+            if (updates.photoURL) {
+                const validAvatars = ['/avatars/male.png', '/avatars/female.png'];
+                if (validAvatars.includes(updates.photoURL)) {
+                    filteredUpdates.photoURL = updates.photoURL;
+                }
+            }
 
             // Convert age to number if present
             if (filteredUpdates.age !== undefined) {
@@ -222,7 +231,6 @@ export class UserController {
                 settings: user.settings,
                 selectedPath: user.selectedPath,
                 phone: user.phone,
-                nickname: user.nickname,
                 city: user.city,
                 age: user.age,
                 birthday: user.birthday,
@@ -407,35 +415,36 @@ export class UserController {
     // Get hydrated saved news items
     static async getSavedNews(req: AuthRequest, res: Response): Promise<void> {
         try {
-            const user = await User.findById(req.userId);
+            // Fetch only the savedNews field — avoids loading the full User document
+            const user = await User.findById(req.userId, 'progress.savedNews').lean();
             if (!user) {
                 res.status(404).json({ error: 'User not found' });
                 return;
             }
 
-            const savedIds = user.progress.savedNews || [];
+            const savedIds = (user as any).progress?.savedNews || [];
             if (savedIds.length === 0) {
                 res.json([]);
                 return;
             }
 
             const activeNews = await News.find({ _id: { $in: savedIds } }, {
-                title: 1, category: 1, type: 1, imageUrl: 1, images: 1, date: 1, card_date: 1, readTime: 1
+                title: 1, category: 1, type: 1, imageUrl: 1, images: 1, date: 1, card_date: 1, readTime: 1,
             }).lean();
 
             // Sort by original save order (newest first)
-            const sortedNews = activeNews.sort((a, b) => {
-                return savedIds.indexOf(b._id.toString()) - savedIds.indexOf(a._id.toString());
-            });
+            activeNews.sort((a: any, b: any) =>
+                savedIds.indexOf(b._id.toString()) - savedIds.indexOf(a._id.toString())
+            );
 
-            res.json(sortedNews);
+            res.json(activeNews);
         } catch (error) {
             console.error('Get saved news error:', error);
             res.status(500).json({ error: 'Failed to get saved news' });
         }
     }
 
-    // Toggle saved news
+    // Toggle saved news (atomic — avoids loading + saving the full User document)
     static async toggleSavedNews(req: AuthRequest, res: Response): Promise<void> {
         try {
             const { newsId } = req.body;
@@ -444,30 +453,31 @@ export class UserController {
                 return;
             }
 
-            const user = await User.findById(req.userId);
-            if (!user) {
+            // Read only the savedNews array — much cheaper than a full user fetch
+            const snap = await User.findById(req.userId, 'progress.savedNews').lean();
+            if (!snap) {
                 res.status(404).json({ error: 'User not found' });
                 return;
             }
 
-            const savedNews = user.progress.savedNews || [];
-            const index = savedNews.indexOf(newsId);
-            let action = '';
+            const savedNews: string[] = (snap as any).progress?.savedNews ?? [];
+            const isSaved = savedNews.includes(newsId);
 
-            if (index === -1) {
-                // Not saved, add it
-                savedNews.push(newsId);
-                action = 'saved';
+            // Use atomic MongoDB operators — no full document load or save required
+            if (isSaved) {
+                await User.updateOne({ _id: req.userId }, { $pull: { 'progress.savedNews': newsId } });
             } else {
-                // Already saved, remove it
-                savedNews.splice(index, 1);
-                action = 'unsaved';
+                await User.updateOne({ _id: req.userId }, { $addToSet: { 'progress.savedNews': newsId } });
             }
 
-            user.progress.savedNews = savedNews;
-            await user.save();
+            const updatedSavedNews = isSaved
+                ? savedNews.filter(id => id !== newsId)
+                : [...savedNews, newsId];
 
-            res.json({ message: `Article ${action} successfully`, savedNews });
+            res.json({
+                message: `Article ${isSaved ? 'unsaved' : 'saved'} successfully`,
+                savedNews: updatedSavedNews,
+            });
         } catch (error) {
             console.error('Toggle saved news error:', error);
             res.status(500).json({ error: 'Failed to toggle saved news' });
@@ -566,25 +576,25 @@ export class UserController {
     // Get contribution count for the month
     static async getContributionStatus(req: AuthRequest, res: Response): Promise<void> {
         try {
-            const user = await User.findById(req.userId);
+            // Select only the fields we need
+            const user = await User.findById(req.userId, 'subscription.plan contributionCount').lean();
             if (!user) {
                 res.status(404).json({ error: 'User not found' });
                 return;
             }
 
-            const isPremium = user.isPremium;
+            const u = user as any;
+            const isPremium = u.subscription?.plan === 'premium' || u.subscription?.plan === 'pro';
             const LIMIT = 30;
-
-            // Reset count if we're in a new month
             const now = new Date();
-            const resetAt = user.contributionCount?.resetAt || new Date(0);
+            const resetAt: Date = u.contributionCount?.resetAt || new Date(0);
             const isNewMonth = resetAt.getFullYear() < now.getFullYear() ||
                 (resetAt.getFullYear() === now.getFullYear() && resetAt.getMonth() < now.getMonth());
 
-            let count = user.contributionCount?.count || 0;
+            let count = u.contributionCount?.count || 0;
             if (isNewMonth) {
                 count = 0;
-                await User.findByIdAndUpdate(req.userId, {
+                await User.updateOne({ _id: req.userId }, {
                     'contributionCount.count': 0,
                     'contributionCount.resetAt': now,
                 });
@@ -606,39 +616,36 @@ export class UserController {
     // Increment contribution count (called after successful upload)
     static async incrementContributionCount(req: AuthRequest, res: Response): Promise<void> {
         try {
-            const user = await User.findById(req.userId);
+            // Select only the fields we need — avoids loading the full User document
+            const user = await User.findById(req.userId, 'subscription.plan contributionCount').lean();
             if (!user) {
                 res.status(404).json({ error: 'User not found' });
                 return;
             }
 
+            const u = user as any;
             const LIMIT = 30;
             const now = new Date();
+            const isPremium = u.subscription?.plan === 'premium' || u.subscription?.plan === 'pro';
 
-            // Check premium
-            if (user.isPremium) {
-                // Premium users: just increment, no limit
-                await User.findByIdAndUpdate(req.userId, {
-                    $inc: { 'contributionCount.count': 1 },
-                    'contributionCount.resetAt': user.contributionCount?.resetAt || now,
-                });
+            if (isPremium) {
+                await User.updateOne({ _id: req.userId }, { $inc: { 'contributionCount.count': 1 } });
                 res.json({ success: true, unlimited: true });
                 return;
             }
 
-            // Reset if new month
-            const resetAt = user.contributionCount?.resetAt || new Date(0);
+            const resetAt: Date = u.contributionCount?.resetAt || new Date(0);
             const isNewMonth = resetAt.getFullYear() < now.getFullYear() ||
                 (resetAt.getFullYear() === now.getFullYear() && resetAt.getMonth() < now.getMonth());
 
-            const currentCount = isNewMonth ? 0 : (user.contributionCount?.count || 0);
+            const currentCount = isNewMonth ? 0 : (u.contributionCount?.count || 0);
 
             if (currentCount >= LIMIT) {
                 res.status(429).json({ error: 'Monthly contribution limit reached', limit: LIMIT });
                 return;
             }
 
-            await User.findByIdAndUpdate(req.userId, {
+            await User.updateOne({ _id: req.userId }, {
                 'contributionCount.count': currentCount + 1,
                 'contributionCount.resetAt': isNewMonth ? now : resetAt,
             });

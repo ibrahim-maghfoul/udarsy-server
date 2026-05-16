@@ -41,12 +41,15 @@ export const config = {
         windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '900000'), // 15 minutes
         max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100'),
     },
+    resendApiKey: process.env.RESEND_API_KEY || '',
+    frontendUrl: process.env.FRONTEND_URL?.split(',')[0] || 'http://localhost:3000',
+
     email: {
         host: process.env.EMAIL_HOST || 'smtp.gmail.com',
         port: parseInt(process.env.EMAIL_PORT || '587'),
         user: process.env.EMAIL_USER,
         pass: process.env.EMAIL_PASS,
-        from: process.env.EMAIL_FROM || '"Udarsy" <hello@udarsy.io>',
+        from: process.env.EMAIL_FROM || '"Udarsy" <noreply@udarsy.com>',
         adminEmail: process.env.ADMIN_EMAIL || 'ibratst1@gmail.com'
     },
 

@@ -5,32 +5,33 @@ import crypto from 'crypto';
 import { r2Client, r2Url } from '../config/r2';
 import { config } from '../config';
 import { PutObjectCommand } from '@aws-sdk/client-s3';
+import { authMiddleware, adminMiddleware } from '../middleware/auth';
 
 const router = Router();
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// Allowlist for topicId: alphanumeric, hyphens, and underscores only.
+// Prevents path traversal (../../etc) in any filesystem operation using topicId.
+const SAFE_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
+function isSafeId(id: string): boolean {
+    return SAFE_ID_RE.test(id);
+}
+
 // ─── API Key Management ───────────────────────────────────────────────────────
+// Keys are loaded from keys.json (NOT committed to git).
+// Place your Infip API keys in udarsy-backend/keys.json as:
+//   ["infip-xxxx", "infip-yyyy", ...]
+// or as: { "api_keys": ["infip-xxxx", ...] }
 
 const getApiKeys = (): string[] => {
-    const hardcoded = [
-        "infip-5350e2b6", "infip-744117e5", "infip-b005d12c", "infip-e6ac682a",
-        "infip-ac628e9f", "infip-2fcc7019", "infip-b058c62b", "infip-d1302957",
-        "infip-3642c084", "infip-523fda1b", "infip-c0e6a9b5", "infip-ed3aaacb",
-        "infip-9aa99cdb", "infip-17379f55", "infip-6b4a3ab4", "infip-5bdc6d7d",
-        "infip-a32b9b2f", "infip-9d05a08f", "infip-be7dd422", "infip-9ff0efaa",
-        "infip-fa216627", "infip-41cbfaa9", "infip-3b87ee6f", "infip-e609470f",
-        "infip-86dc3b16", "infip-d112da9a", "infip-527ccd05", "infip-dc0cef3f",
-        "infip-2bb032bd", "infip-4afc2039", "infip-c322704f", "infip-3dd59b1f",
-        "infip-d8cdc10b", "infip-1e3f796f", "infip-77c9ba18", "infip-f1bf735d",
-        "infip-c8e39b24", "infip-8a98801e", "infip-2b40ba53", "infip-5b95d2b3",
-        "infip-e30fc0ea", "infip-ef0a0c21", "infip-68e9200d", "infip-6a801c65",
-        "infip-55c92743", "infip-36fd29ab", "infip-b98ee253", "infip-abb8260d",
-        "infip-94140f27", "infip-9db76de0", "infip-ee8c4b91", "infip-38e7bcc4",
-        "infip-6d86d5f6", "infip-8357e5dc", "infip-6cf39dfc", "infip-04bf8c3a",
-        "infip-c488dc9d", "infip-129aefd5", "infip-91900813", "infip-88f277db",
-        "infip-6c14913e", "infip-1f0bd602", "infip-684ea20b", "infip-6136f84f",
-        "infip-4c61ec7c", "infip-19abf69e", "infip-8343b6af", "infip-1e8e52a1",
-        "infip-7d20457f", "infip-ff1377b4"
-    ];
+    // Load from environment variable (comma-separated) if set
+    const envKeys = process.env.INFIP_API_KEYS;
+    if (envKeys) {
+        const keys = envKeys.split(',').map(k => k.trim()).filter(Boolean);
+        if (keys.length > 0) return keys;
+    }
+    // Fall back to keys.json file (should not be committed to git)
     try {
         const keysPath = path.join(__dirname, '../../keys.json');
         if (fs.existsSync(keysPath)) {
@@ -39,9 +40,10 @@ const getApiKeys = (): string[] => {
             if (keys.length > 0) return keys;
         }
     } catch {
-        console.warn('⚠️ Failed to parse keys.json, using hardcoded keys');
+        console.warn('⚠️ Failed to parse keys.json');
     }
-    return hardcoded;
+    console.error('❌ No Infip API keys found. Set INFIP_API_KEYS env var or create keys.json.');
+    return [];
 };
 
 let currentKeyIndex = 0;
@@ -126,7 +128,7 @@ router.get('/proxy', async (req: Request, res: Response) => {
 // ─── POST /generate-poster-image ─────────────────────────────────────────────
 // provider: 'ghost' (default, uses infip) | 'openai' (uses DALL-E 3)
 
-router.post('/generate-poster-image', async (req: Request, res: Response) => {
+router.post('/generate-poster-image', authMiddleware, adminMiddleware, async (req: Request, res: Response) => {
     try {
         const { prompt, size = '1024x1024', n = 1, model = 'ghost' } = req.body;
         if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
@@ -315,10 +317,11 @@ router.post('/generate-poster-image', async (req: Request, res: Response) => {
 // ─── POST /save-session ───────────────────────────────────────────────────────
 // Saves one poster image + upserts session.json metadata under data/content-sessions/{topicId}/
 
-router.post('/save-session', async (req: Request, res: Response) => {
+router.post('/save-session', authMiddleware, adminMiddleware, async (req: Request, res: Response) => {
     try {
         const { topicId, topic, title, headline, subline, designPrompt, socialCaption, theme, model, language, imageUrl } = req.body;
         if (!topicId || !imageUrl) return res.status(400).json({ error: 'topicId and imageUrl are required' });
+        if (!isSafeId(topicId)) return res.status(400).json({ error: 'Invalid topicId format.' });
 
         const sessionDir = path.join(process.cwd(), '../udarsy-admin/public/data', 'content-sessions', topicId);
         if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
@@ -391,10 +394,11 @@ router.get('/sessions', (_req: Request, res: Response) => {
 // ─── DELETE /sessions/:topicId ────────────────────────────────────────────────
 // Deletes a session folder and all its contents
 
-router.delete('/sessions/:topicId', (req: Request, res: Response) => {
+router.delete('/sessions/:topicId', authMiddleware, adminMiddleware, (req: Request, res: Response) => {
     try {
         const { topicId } = req.params;
         if (!topicId) return res.status(400).json({ error: 'topicId is required' });
+        if (!isSafeId(topicId)) return res.status(400).json({ error: 'Invalid topicId format.' });
 
         const sessionDir = path.join(process.cwd(), '../udarsy-admin/public/data', 'content-sessions', topicId);
         if (!fs.existsSync(sessionDir)) return res.status(404).json({ error: 'Session not found' });
@@ -409,10 +413,11 @@ router.delete('/sessions/:topicId', (req: Request, res: Response) => {
 // ─── PATCH /sessions/:topicId ─────────────────────────────────────────────────
 // Update mutable session fields (caption, etc.)
 
-router.patch('/sessions/:topicId', (req: Request, res: Response) => {
+router.patch('/sessions/:topicId', authMiddleware, adminMiddleware, (req: Request, res: Response) => {
     try {
         const { topicId } = req.params;
         if (!topicId) return res.status(400).json({ error: 'topicId is required' });
+        if (!isSafeId(topicId)) return res.status(400).json({ error: 'Invalid topicId format.' });
 
         const sessionDir = path.join(process.cwd(), '../udarsy-admin/public/data', 'content-sessions', topicId);
         const metaPath = path.join(sessionDir, 'session.json');

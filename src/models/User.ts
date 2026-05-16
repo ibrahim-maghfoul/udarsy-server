@@ -49,7 +49,6 @@ export interface IUser extends Document {
         guidance: string;
     };
     phone?: string;
-    nickname?: string;
     city?: string;
     age?: number;
     birthday?: Date;
@@ -105,6 +104,11 @@ export interface IUser extends Document {
     aiLastRegenDate?: Date;
     aiRegenCountToday?: number;
     chatMutedUntil?: Date;
+    isVerified: boolean;
+    verificationToken?: string;
+    verificationTokenExpiry?: Date;
+    resetPasswordToken?: string;
+    resetPasswordTokenExpiry?: Date;
     createdAt: Date;
     updatedAt: Date;
     isPremium: boolean; // virtual
@@ -130,7 +134,6 @@ const UserSchema = new Schema<IUser>({
         guidance: String,
     },
     phone: String,
-    nickname: String,
     city: String,
     age: { type: Number, max: 80 },
     birthday: { type: Date },
@@ -186,6 +189,11 @@ const UserSchema = new Schema<IUser>({
     aiLastRegenDate: { type: Date },
     aiRegenCountToday: { type: Number, default: 0 },
     chatMutedUntil: { type: Date },
+    isVerified: { type: Boolean, default: false },
+    verificationToken: { type: String, select: false },
+    verificationTokenExpiry: { type: Date, select: false },
+    resetPasswordToken: { type: String, select: false },
+    resetPasswordTokenExpiry: { type: Date, select: false },
 }, {
     timestamps: true,
 });
@@ -213,6 +221,7 @@ UserSchema.pre('save', function(next) {
 });
 
 // Indexes for better query performance
+UserSchema.index({ email: 1 });                              // login lookup
 UserSchema.index({ 'progress.lessons.lessonId': 1 });
 UserSchema.index({ 'progress.lessons.subjectId': 1 });
 UserSchema.index({ role: 1 });
@@ -220,6 +229,7 @@ UserSchema.index({ 'selectedPath.guidanceId': 1 });
 UserSchema.index({ 'subscription.plan': 1 });
 UserSchema.index({ createdAt: -1 });
 UserSchema.index({ points: -1 });
+
 
 
 // Virtual: isPremium is true when plan is 'premium' or 'pro'

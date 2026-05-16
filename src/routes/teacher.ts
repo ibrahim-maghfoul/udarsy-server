@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import mongoose from 'mongoose';
 import { TeacherController } from '../controllers/teacherController';
 import { authMiddleware, adminMiddleware } from '../middleware/auth';
 import { videoUpload, verificationUpload, processVerificationDoc, roomFileUpload } from '../middleware/upload';
@@ -124,11 +125,30 @@ router.get('/rooms/:id/messages', authMiddleware, async (req: any, res: Response
             res.status(403).json({ error: 'Not a member of this room' }); return;
         }
 
-        const messages = await TeacherRoomMessage.find({ roomId: id })
-            .sort({ createdAt: -1 })
-            .limit(50)
-            .populate('sender', 'displayName photoURL role subscription.plan')
-            .populate({ path: 'replyTo', select: 'text sender', populate: { path: 'sender', select: '_id displayName' } });
+        // Single aggregation pipeline replaces N+1 populate() calls
+        const messages = await TeacherRoomMessage.aggregate([
+            { $match: { roomId: new mongoose.Types.ObjectId(id) } },
+            { $sort: { createdAt: -1 } },
+            { $limit: 50 },
+            { $lookup: {
+                from: 'users', localField: 'sender', foreignField: '_id', as: '_sender',
+                pipeline: [{ $project: { displayName: 1, photoURL: 1, role: 1, 'subscription.plan': 1 } }],
+            }},
+            { $addFields: { sender: { $arrayElemAt: ['$_sender', 0] } } },
+            { $lookup: {
+                from: 'teacherroommessages', localField: 'replyTo', foreignField: '_id', as: '_replyTo',
+                pipeline: [
+                    { $lookup: {
+                        from: 'users', localField: 'sender', foreignField: '_id', as: '_s',
+                        pipeline: [{ $project: { _id: 1, displayName: 1 } }],
+                    }},
+                    { $addFields: { sender: { $arrayElemAt: ['$_s', 0] } } },
+                    { $project: { text: 1, sender: 1 } },
+                ],
+            }},
+            { $addFields: { replyTo: { $arrayElemAt: ['$_replyTo', 0] } } },
+            { $project: { _sender: 0, _replyTo: 0 } },
+        ]);
 
         res.json(messages.reverse());
     } catch (err) {
